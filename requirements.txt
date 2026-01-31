@@ -1,0 +1,8 @@
+# Core dependencies will be added as the project develops
+# Common dependencies for 3D modeling and AI:
+# numpy
+# torch
+# transformers
+# trimesh
+# cadquery
+# scipy

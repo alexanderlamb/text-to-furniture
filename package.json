@@ -1,0 +1,17 @@
+{
+  "name": "text-to-furniture",
+  "version": "0.1.0",
+  "description": "A custom text-to-flat-pack furniture model and product generator",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "furniture",
+    "flat-pack",
+    "3d-modeling",
+    "generative-design"
+  ],
+  "author": "",
+  "license": "ISC"
+}
