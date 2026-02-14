@@ -8,18 +8,17 @@ shapely>=2.0.0
 svgwrite>=1.4.3
 ezdxf>=1.0.0
 
-# Genetic Algorithm (for Phase 2)
-deap>=1.4.0
-pymoo>=0.6.0
-
-# ML/Training (for Phase 4+)
-torch>=2.0.0
-transformers>=4.30.0
+# Cloud Mesh Generation Providers
+tripo3d>=0.1.0
+requests>=2.31.0
 
 # Utilities
 matplotlib>=3.7.0
 scipy>=1.10.0
 tqdm>=4.65.0
+
+# Web UI
+nicegui>=2.0.0
 
 # Development
 pytest>=7.3.0

@@ -1,0 +1,689 @@
+{
+  "version": "1.0.0",
+  "mesh_path": "models/table_scs.stl",
+  "timestamp": "2026-02-11T23:31:06.890829+00:00",
+  "config_snapshot": {
+    "max_slabs": 15,
+    "coverage_target": 0.8,
+    "min_coverage_contribution": 0.002,
+    "voxel_resolution_mm": 5.0,
+    "dfm_check": true,
+    "default_material": "plywood_baltic_birch",
+    "target_height_mm": 700.0,
+    "joint_proximity_mm": 25.0,
+    "pose_alignment_fix": true
+  },
+  "mesh_faces": 60,
+  "mesh_extents_mm": [
+    600.0,
+    400.0,
+    700.0
+  ],
+  "candidate_generation": {
+    "total": 21,
+    "by_source": {
+      "ransac": 7
+    },
+    "after_dedupe": 21
+  },
+  "selection_trace": [
+    {
+      "iteration": 1,
+      "candidate_index": 1,
+      "source": "ransac",
+      "width_mm": 400.0,
+      "height_mm": 600.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 9799,
+      "coverage_after": 0.25731316632529805,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 2,
+      "candidate_index": 0,
+      "source": "ransac",
+      "width_mm": 400.0,
+      "height_mm": 600.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 9404,
+      "coverage_after": 0.5042539782574444,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 3,
+      "candidate_index": 2,
+      "source": "ransac",
+      "width_mm": 600.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 2988,
+      "coverage_after": 0.5827162438947534,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 4,
+      "candidate_index": 5,
+      "source": "ransac",
+      "width_mm": 400.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 2582,
+      "coverage_after": 0.6505173047634053,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 5,
+      "candidate_index": 6,
+      "source": "ransac",
+      "width_mm": 400.0,
+      "height_mm": 681.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 2578,
+      "coverage_after": 0.7182133291318733,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 6,
+      "candidate_index": 4,
+      "source": "ransac",
+      "width_mm": 400.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 2164,
+      "coverage_after": 0.7750380757313167,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 7,
+      "candidate_index": 3,
+      "source": "ransac",
+      "width_mm": 600.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 1759,
+      "coverage_after": 0.8212278766871488,
+      "dfm_rejected": false
+    }
+  ],
+  "selection_stop_reason": "coverage_target_met",
+  "parts": [
+    {
+      "name": "part_0",
+      "width_mm": 400.0,
+      "height_mm": 600.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [],
+      "component_type": "shelf",
+      "position": [
+        0.0,
+        0.0,
+        700.0
+      ]
+    },
+    {
+      "name": "part_1",
+      "width_mm": 400.0,
+      "height_mm": 600.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [],
+      "component_type": "shelf",
+      "position": [
+        0.0,
+        0.0,
+        681.0
+      ]
+    },
+    {
+      "name": "part_2",
+      "width_mm": 600.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 0 and 8 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 1 and 9 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 2 and 10 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 3 and 11 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 4 and 12 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 5 and 13 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 6 and 14 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 7 and 15 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        }
+      ],
+      "component_type": "panel",
+      "position": [
+        0.0,
+        191.7304189435337,
+        350.0
+      ]
+    },
+    {
+      "name": "part_3",
+      "width_mm": 400.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 0 and 5 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 1 and 6 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 2 and 7 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 3 and 8 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 4 and 9 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        }
+      ],
+      "component_type": "panel",
+      "position": [
+        291.2242268041237,
+        0.0,
+        350.0
+      ]
+    },
+    {
+      "name": "part_4",
+      "width_mm": 400.0,
+      "height_mm": 681.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 0 and 5 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 1 and 6 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 2 and 7 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 3 and 8 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 4 and 9 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        }
+      ],
+      "component_type": "panel",
+      "position": [
+        -250.0,
+        0.0,
+        340.5
+      ]
+    },
+    {
+      "name": "part_5",
+      "width_mm": 400.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 0 and 5 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 1 and 6 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 2 and 7 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 3 and 8 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 4 and 9 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        }
+      ],
+      "component_type": "panel",
+      "position": [
+        -291.2242268041237,
+        0.0,
+        350.0
+      ]
+    },
+    {
+      "name": "part_6",
+      "width_mm": 600.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 0 and 8 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 1 and 9 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 1 and 33 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 2 and 10 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 2 and 34 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 3 and 11 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 3 and 35 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 4 and 12 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 4 and 36 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 5 and 13 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 5 and 37 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 6 and 14 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 6 and 38 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 7 and 15 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 9 and 33 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 10 and 34 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 11 and 35 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 12 and 36 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 13 and 37 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 14 and 38 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 16 and 24 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 17 and 25 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 18 and 26 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 19 and 27 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 20 and 28 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 21 and 29 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 22 and 30 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutouts 23 and 31 are 0.00mm apart (min 3.17mm)",
+          "value": 0.0,
+          "limit": 3.175
+        }
+      ],
+      "component_type": "panel",
+      "position": [
+        0.0,
+        -191.7304189435337,
+        350.0
+      ]
+    }
+  ],
+  "scores": {
+    "hausdorff_mm": 43.527762246265915,
+    "mean_distance_mm": 9.908992814065048,
+    "part_count": 7,
+    "dfm_violations_error": 0,
+    "dfm_violations_warning": 51,
+    "structural_plausibility": 1.0,
+    "overall_score": 0.36883342652240453,
+    "coverage_fraction": 0.8212278766871488,
+    "fit_ratios": [
+      0.9707474226804124,
+      0.9586520947176684,
+      0.5135714285714286
+    ]
+  },
+  "simulation": {
+    "stable": true,
+    "position_change": 4.926097314332596e-05,
+    "rotation_change": 9.143746400522142e-05,
+    "height_drop": 0.014772815257316475,
+    "fell_over": false,
+    "touched_ground": false,
+    "simulation_time": 3.0,
+    "wall_time": 0.13010025024414062,
+    "load_test_passed": true,
+    "load_final_height": 0.0
+  },
+  "quality_gates": [
+    {
+      "name": "coverage",
+      "status": "pass",
+      "metric_value": 0.8212278766871488,
+      "threshold_pass": 0.7,
+      "threshold_fail": 0.5,
+      "message": "Surface coverage 82.1%",
+      "recommendations": []
+    },
+    {
+      "name": "part_count",
+      "status": "pass",
+      "metric_value": 7.0,
+      "threshold_pass": 15.0,
+      "threshold_fail": 20.0,
+      "message": "7 parts selected",
+      "recommendations": []
+    },
+    {
+      "name": "hausdorff",
+      "status": "warn",
+      "metric_value": 43.527762246265915,
+      "threshold_pass": 30.0,
+      "threshold_fail": 60.0,
+      "message": "Hausdorff distance 43.5 mm",
+      "recommendations": [
+        "High hausdorff distance: missing surface coverage",
+        "Add candidate sources or lower area threshold"
+      ]
+    },
+    {
+      "name": "dfm_errors",
+      "status": "pass",
+      "metric_value": 0.0,
+      "threshold_pass": 0.0,
+      "threshold_fail": 3.0,
+      "message": "0 DFM errors",
+      "recommendations": []
+    },
+    {
+      "name": "structural",
+      "status": "pass",
+      "metric_value": 1.0,
+      "threshold_pass": 0.75,
+      "threshold_fail": 0.5,
+      "message": "Structural plausibility 1.00",
+      "recommendations": []
+    },
+    {
+      "name": "stability",
+      "status": "pass",
+      "metric_value": 1.0,
+      "threshold_pass": 1.0,
+      "threshold_fail": 0.5,
+      "message": "Stable",
+      "recommendations": []
+    },
+    {
+      "name": "fit_ratios",
+      "status": "pass",
+      "metric_value": 0.48642857142857143,
+      "threshold_pass": 0.5,
+      "threshold_fail": 1.0,
+      "message": "Fit ratio deviation 0.49 (ratios: ['0.97', '0.96', '0.51'])",
+      "recommendations": []
+    }
+  ],
+  "overall_status": "warn",
+  "summary": "Decomposition produced 7 parts with 82% surface coverage and 43.5 mm Hausdorff distance. All gates passed but 1 have warnings. Top recommendation: High hausdorff distance: missing surface coverage",
+  "top_issues": [
+    "[WARN] hausdorff: Hausdorff distance 43.5 mm"
+  ],
+  "recommended_actions": [
+    "High hausdorff distance: missing surface coverage",
+    "Add candidate sources or lower area threshold"
+  ],
+  "comparison": {
+    "previous_path": "output/diag_run6/diagnosis_report.json",
+    "previous_overall_status": "fail",
+    "current_overall_status": "warn",
+    "deltas": {
+      "coverage_fraction": 0.0,
+      "hausdorff_mm": 0.25550534634383837,
+      "part_count": 0,
+      "structural_plausibility": 0.0,
+      "overall_score": -0.0015330320780630458,
+      "dfm_violations_error": -6
+    },
+    "verdict": "unchanged"
+  }
+}

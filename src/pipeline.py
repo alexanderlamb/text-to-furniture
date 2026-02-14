@@ -1,268 +1,266 @@
 """
-End-to-end pipeline demonstration.
+End-to-end pipeline: Text/Image -> Cloud API -> 3D Mesh -> Flat-Pack Design -> SVG.
 
-Shows the complete flow:
-1. Generate random furniture genome
-2. Convert to FurnitureDesign
-3. Run physics simulation
-4. Export SVG cut files (if stable)
+Two entry points:
+  - run_pipeline(): Generate mesh from text/image via cloud provider, then decompose
+  - run_pipeline_from_mesh(): Start from an existing mesh file (skip cloud generation)
 
-This is the foundation for the genetic algorithm - each design
-goes through this pipeline to determine fitness.
+Both produce a FurnitureDesign with optional physics simulation and SVG export.
 """
 import os
-import numpy as np
-from typing import List, Tuple, Optional
-from dataclasses import dataclass
+import json
+import logging
+from typing import Optional, List
+from dataclasses import dataclass, field
 
-from genome import (
-    FurnitureGenome, create_table_genome, create_shelf_genome, 
-    create_random_genome
-)
+from mesh_provider import MeshProvider, GenerationResult
+from mesh_decomposer import decompose, DecompositionConfig
+from furniture import FurnitureDesign
 from simulator import FurnitureSimulator, SimulationResult
 from svg_exporter import design_to_svg, design_to_nested_svg
+from manufacturing_decomposer_v2 import (
+    ManufacturingDecompositionConfigV2,
+    ManufacturingDecompositionResult,
+    decompose_manufacturing_v2,
+)
+from dxf_exporter import design_to_dxf, design_to_nested_dxf
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PipelineConfig:
+    """Configuration for the full pipeline."""
+    decomposition: DecompositionConfig = field(default_factory=DecompositionConfig)
+    run_simulation: bool = True
+    sim_duration: float = 3.0
+    export_svg: bool = True
+    export_nested_svg: bool = True
+    optimize_decomposition: bool = True
+    output_dir: str = "output"
+    use_manufacturing_v2: bool = False
+    manufacturing_v2_config: Optional[ManufacturingDecompositionConfigV2] = None
+    export_dxf: bool = False
 
 
 @dataclass
 class PipelineResult:
-    """Result from processing a single design through the pipeline."""
-    genome: FurnitureGenome
-    design_name: str
-    simulation: SimulationResult
-    svg_paths: List[str]
-    nested_svg: Optional[str]
-    
+    """Result from the full pipeline."""
+    design: FurnitureDesign
+    mesh_path: str
+    generation: Optional[GenerationResult] = None
+    simulation: Optional[SimulationResult] = None
+    svg_paths: List[str] = field(default_factory=list)
+    nested_svg_path: Optional[str] = None
+    design_json_path: Optional[str] = None
+    dxf_paths: List[str] = field(default_factory=list)
+    manufacturing_result: Optional[ManufacturingDecompositionResult] = None
+
     @property
-    def is_valid(self) -> bool:
-        """Design is valid if it's physically stable."""
+    def is_stable(self) -> bool:
+        if self.simulation is None:
+            return True  # Not tested
         return self.simulation.stable
 
 
-def process_design(
-    genome: FurnitureGenome,
+def _run_post_mesh(
+    mesh_path: str,
     design_name: str,
-    output_dir: str,
-    simulator: FurnitureSimulator,
-    export_svg: bool = True,
-    sim_duration: float = 2.0,
+    config: PipelineConfig,
+    generation: Optional[GenerationResult] = None,
 ) -> PipelineResult:
-    """
-    Process a single furniture genome through the full pipeline.
-    
-    Args:
-        genome: Furniture genome to process
-        design_name: Name for this design
-        output_dir: Directory for output files
-        simulator: Pre-initialized simulator instance
-        export_svg: Whether to export SVG files
-        sim_duration: Physics simulation duration
-    
-    Returns:
-        PipelineResult with all outputs
-    """
-    # Convert genome to design
-    design = genome.to_furniture_design(design_name)
-    
-    # Run physics simulation
-    sim_result = simulator.simulate(design, duration=sim_duration)
-    
-    # Export SVG if requested and design is stable
+    """Shared logic after a mesh file is available."""
+    output_dir = os.path.join(config.output_dir, design_name)
+    os.makedirs(output_dir, exist_ok=True)
+
+    manufacturing_result = None
+    dxf_paths = []
+
+    if config.use_manufacturing_v2:
+        # V2 3D-first manufacturing pipeline
+        v2_config = config.manufacturing_v2_config or ManufacturingDecompositionConfigV2(
+            default_material=config.decomposition.default_material,
+            target_height_mm=config.decomposition.target_height_mm,
+            auto_scale=config.decomposition.auto_scale,
+        )
+
+        logger.info("Running v2 manufacturing decomposition: %s", mesh_path)
+        manufacturing_result = decompose_manufacturing_v2(mesh_path, v2_config)
+        design = manufacturing_result.design
+        design.name = design_name
+
+        logger.info(
+            "V2 manufacturing decomposition: %d components, %d joints, score=%.2f",
+            len(design.components),
+            len(design.assembly.joints),
+            manufacturing_result.score.overall_score,
+        )
+
+        # Save manufacturing JSON
+        design_json_path = os.path.join(output_dir, "design_manufacturing.json")
+        with open(design_json_path, "w") as f:
+            json.dump(manufacturing_result.to_manufacturing_json(), f, indent=2)
+
+        # Export DXF
+        if config.export_dxf and manufacturing_result.parts:
+            dxf_dir = os.path.join(output_dir, "dxf")
+            dxf_parts = list(manufacturing_result.parts.items())
+            dxf_paths = design_to_dxf(dxf_parts, dxf_dir)
+            nested_dxf = os.path.join(dxf_dir, f"{design_name}_nested.dxf")
+            design_to_nested_dxf(dxf_parts, nested_dxf)
+            dxf_paths.append(nested_dxf)
+            logger.info("Exported %d DXF files", len(dxf_paths))
+
+    else:
+        # Original voxel-based pipeline
+        logger.info("Decomposing mesh: %s", mesh_path)
+        design = decompose(
+            filepath=mesh_path,
+            config=config.decomposition,
+            optimize=config.optimize_decomposition,
+        )
+        design.name = design_name
+        logger.info(
+            "Decomposed into %d components, %d joints",
+            len(design.components), len(design.assembly.joints),
+        )
+
+        design_json_path = os.path.join(output_dir, "design.json")
+
+    # Save design JSON (for both paths)
+    if not config.use_manufacturing_v2:
+        design_json_path = os.path.join(output_dir, "design.json")
+        design_data = {
+            "name": design.name,
+            "components": [
+                {
+                    "name": c.name,
+                    "type": c.type.value,
+                    "width": float(c.profile[2][0]) if len(c.profile) >= 3 else 0,
+                    "height": float(c.profile[2][1]) if len(c.profile) >= 3 else 0,
+                    "thickness": float(c.thickness),
+                    "position": [float(x) for x in c.position],
+                    "rotation": [float(x) for x in c.rotation],
+                    "material": c.material,
+                }
+                for c in design.components
+            ],
+            "joints": [
+                {
+                    "component_a": j.component_a,
+                    "component_b": j.component_b,
+                    "joint_type": j.joint_type.value,
+                }
+                for j in design.assembly.joints
+            ],
+        }
+        with open(design_json_path, "w") as f:
+            json.dump(design_data, f, indent=2)
+
+    # Step 2: Optional physics simulation
+    sim_result = None
+    if config.run_simulation:
+        logger.info("Running physics simulation...")
+        sim = FurnitureSimulator(gui=False)
+        try:
+            sim_result = sim.simulate(design, duration=config.sim_duration)
+            logger.info(
+                "Simulation: %s (pos_change=%.4f, rot_change=%.4f)",
+                "STABLE" if sim_result.stable else "UNSTABLE",
+                sim_result.position_change,
+                sim_result.rotation_change,
+            )
+        finally:
+            sim.close()
+
+    # Step 3: Export SVGs
     svg_paths = []
     nested_svg = None
-    
-    if export_svg and sim_result.stable:
-        design_dir = os.path.join(output_dir, design_name)
-        svg_paths = design_to_svg(design, design_dir)
-        nested_svg = os.path.join(design_dir, f"{design_name}_nested.svg")
-        design_to_nested_svg(design, nested_svg)
-    
+    if config.export_svg:
+        svg_dir = os.path.join(output_dir, "svg")
+        svg_paths = design_to_svg(design, svg_dir)
+        logger.info("Exported %d SVG cut files", len(svg_paths))
+        if config.export_nested_svg:
+            nested_svg = os.path.join(svg_dir, f"{design_name}_nested.svg")
+            design_to_nested_svg(design, nested_svg)
+
     return PipelineResult(
-        genome=genome,
-        design_name=design_name,
+        design=design,
+        mesh_path=mesh_path,
+        generation=generation,
         simulation=sim_result,
         svg_paths=svg_paths,
-        nested_svg=nested_svg,
+        nested_svg_path=nested_svg,
+        design_json_path=design_json_path,
+        dxf_paths=dxf_paths,
+        manufacturing_result=manufacturing_result,
     )
 
 
-def batch_evaluate(
-    genomes: List[FurnitureGenome],
-    output_dir: str,
-    export_svg: bool = False,
-    sim_duration: float = 2.0,
-) -> List[PipelineResult]:
-    """
-    Evaluate a batch of genomes through the pipeline.
-    
-    This is efficient because it reuses a single simulator instance.
-    
+def run_pipeline(
+    provider: MeshProvider,
+    prompt: str = "",
+    image_path: str = "",
+    design_name: str = "furniture",
+    config: Optional[PipelineConfig] = None,
+) -> PipelineResult:
+    """Run the full text/image-to-furniture pipeline.
+
+    Exactly one of prompt or image_path must be provided.
+
     Args:
-        genomes: List of genomes to evaluate
-        output_dir: Directory for output files
-        export_svg: Whether to export SVG files for stable designs
-        sim_duration: Physics simulation duration per design
-    
+        provider: Cloud mesh generation provider (Tripo, Meshy, etc.)
+        prompt: Text description of the desired furniture.
+        image_path: Path to an input image.
+        design_name: Name for this design (used in output paths).
+        config: Pipeline configuration.
+
     Returns:
-        List of PipelineResult objects
+        PipelineResult with design, simulation results, and SVG paths.
     """
-    simulator = FurnitureSimulator(gui=False)
-    results = []
-    
-    try:
-        for i, genome in enumerate(genomes):
-            result = process_design(
-                genome,
-                design_name=f"design_{i:04d}",
-                output_dir=output_dir,
-                simulator=simulator,
-                export_svg=export_svg,
-                sim_duration=sim_duration,
-            )
-            results.append(result)
-    finally:
-        simulator.close()
-    
-    return results
+    if config is None:
+        config = PipelineConfig()
 
-
-def generate_and_evaluate(
-    n_designs: int,
-    furniture_type: str = None,
-    output_dir: str = "output",
-    export_svg: bool = True,
-) -> Tuple[List[PipelineResult], dict]:
-    """
-    Generate random designs and evaluate them.
-    
-    This demonstrates the basic loop that the GA will use:
-    1. Generate random genomes
-    2. Evaluate fitness via physics sim
-    3. Keep the stable ones
-    
-    Args:
-        n_designs: Number of designs to generate
-        furniture_type: Type of furniture ("table", "shelf", or None for random)
-        output_dir: Directory for output files
-        export_svg: Export SVG for stable designs
-    
-    Returns:
-        (results, stats_dict)
-    """
-    print(f"Generating {n_designs} random {furniture_type or 'mixed'} designs...")
-    
-    # Generate genomes
-    genomes = [create_random_genome(furniture_type) for _ in range(n_designs)]
-    
-    # Evaluate
-    print("Running physics simulations...")
-    results = batch_evaluate(
-        genomes, 
-        output_dir, 
-        export_svg=export_svg,
-        sim_duration=2.0
-    )
-    
-    # Compute stats
-    stable_count = sum(1 for r in results if r.is_valid)
-    unstable_count = n_designs - stable_count
-    
-    stats = {
-        "total": n_designs,
-        "stable": stable_count,
-        "unstable": unstable_count,
-        "stability_rate": stable_count / n_designs,
-    }
-    
-    return results, stats
-
-
-if __name__ == "__main__":
-    import time
-    
-    print("="*60)
-    print("TEXT-TO-FURNITURE: End-to-End Pipeline Demo")
-    print("="*60)
-    
-    output_dir = "/Users/alexanderlamb/projects/text-to-furniture/examples/pipeline_output"
+    output_dir = os.path.join(config.output_dir, design_name)
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Demo 1: Single design through full pipeline
-    print("\n--- Demo 1: Single Design Pipeline ---")
-    
-    genome = create_table_genome()
-    design = genome.to_furniture_design("demo_table")
-    
-    print(f"Generated table with {len(design.components)} components")
-    
-    simulator = FurnitureSimulator(gui=False)
-    sim_result = simulator.simulate(design, duration=2.0)
-    simulator.close()
-    
-    print(f"Physics simulation: {'STABLE ✓' if sim_result.stable else 'UNSTABLE ✗'}")
-    print(f"  - Rotation: {np.degrees(sim_result.rotation_change):.1f}°")
-    print(f"  - Position change: {sim_result.position_change:.4f}m")
-    
-    if sim_result.stable:
-        svg_paths = design_to_svg(design, os.path.join(output_dir, "demo_table"))
-        print(f"Exported {len(svg_paths)} SVG cut files")
-    
-    # Demo 2: Batch evaluation - Tables
-    print("\n--- Demo 2: Batch Evaluation (20 Tables) ---")
-    start = time.time()
-    
-    results, stats = generate_and_evaluate(
-        n_designs=20,
-        furniture_type="table",
-        output_dir=output_dir,
-        export_svg=True,
+    mesh_path = os.path.join(output_dir, f"{design_name}.glb")
+
+    # Generate mesh via cloud provider
+    if prompt:
+        logger.info("Generating mesh from text: %s", prompt)
+        gen_result = provider.text_to_mesh(prompt, mesh_path)
+    elif image_path:
+        logger.info("Generating mesh from image: %s", image_path)
+        gen_result = provider.image_to_mesh(image_path, mesh_path)
+    else:
+        raise ValueError("Either prompt or image_path must be provided")
+
+    return _run_post_mesh(
+        gen_result.mesh_path, design_name, config, generation=gen_result
     )
-    
-    elapsed = time.time() - start
-    print(f"\nResults:")
-    print(f"  - Stable: {stats['stable']}/{stats['total']} ({stats['stability_rate']*100:.0f}%)")
-    print(f"  - Time: {elapsed:.1f}s ({elapsed/20:.2f}s per design)")
-    
-    # Show some details
-    print("\nSample results:")
-    for r in results[:5]:
-        status = "✓" if r.is_valid else "✗"
-        rot = np.degrees(r.simulation.rotation_change)
-        print(f"  {r.design_name}: {status} (rot={rot:.1f}°)")
-    
-    # Demo 3: Batch evaluation - Shelves
-    print("\n--- Demo 3: Batch Evaluation (20 Shelves) ---")
-    start = time.time()
-    
-    results, stats = generate_and_evaluate(
-        n_designs=20,
-        furniture_type="shelf",
-        output_dir=output_dir,
-        export_svg=True,
-    )
-    
-    elapsed = time.time() - start
-    print(f"\nResults:")
-    print(f"  - Stable: {stats['stable']}/{stats['total']} ({stats['stability_rate']*100:.0f}%)")
-    print(f"  - Time: {elapsed:.1f}s ({elapsed/20:.2f}s per design)")
-    
-    # Demo 4: Mixed batch
-    print("\n--- Demo 4: Mixed Batch (50 Designs) ---")
-    start = time.time()
-    
-    results, stats = generate_and_evaluate(
-        n_designs=50,
-        furniture_type=None,  # Random mix
-        output_dir=output_dir,
-        export_svg=False,  # Skip SVG for speed
-    )
-    
-    elapsed = time.time() - start
-    print(f"\nResults:")
-    print(f"  - Stable: {stats['stable']}/{stats['total']} ({stats['stability_rate']*100:.0f}%)")
-    print(f"  - Time: {elapsed:.1f}s ({elapsed/50:.2f}s per design)")
-    print(f"  - Throughput: {50/elapsed:.1f} designs/second")
-    
-    print("\n" + "="*60)
-    print("Pipeline demo complete!")
-    print(f"Output saved to: {output_dir}")
-    print("="*60)
+
+
+def run_pipeline_from_mesh(
+    mesh_path: str,
+    design_name: str = "furniture",
+    config: Optional[PipelineConfig] = None,
+) -> PipelineResult:
+    """Run the pipeline from an existing mesh file (skip cloud generation).
+
+    Useful for local meshes or debugging the decomposition step.
+
+    Args:
+        mesh_path: Path to a 3D mesh file (STL, OBJ, GLB, PLY).
+        design_name: Name for this design.
+        config: Pipeline configuration.
+
+    Returns:
+        PipelineResult with design, simulation results, and SVG paths.
+    """
+    if config is None:
+        config = PipelineConfig()
+
+    if not os.path.isfile(mesh_path):
+        raise FileNotFoundError(f"Mesh file not found: {mesh_path}")
+
+    return _run_post_mesh(mesh_path, design_name, config)

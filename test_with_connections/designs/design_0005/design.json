@@ -1,0 +1,519 @@
+{
+  "design_id": 5,
+  "generation": 3,
+  "components": [
+    {
+      "index": 0,
+      "type": "panel",
+      "dimensions": {
+        "width": 735.793385809439,
+        "height": 425.85176539474156,
+        "thickness": 0.7619999999999999
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "rotation": {
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "material": "stainless_304"
+    },
+    {
+      "index": 1,
+      "type": "panel",
+      "dimensions": {
+        "width": 50.0,
+        "height": 546.2917926861409,
+        "thickness": 232.23051234518627
+      },
+      "position": {
+        "x": 430.64339512565635,
+        "y": -85.92690868263983,
+        "z": 1.262
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.1040939244216138,
+        "rz": 0.0
+      },
+      "material": "hdpe"
+    },
+    {
+      "index": 2,
+      "type": "panel",
+      "dimensions": {
+        "width": 4.7498,
+        "height": 420.2819874888912,
+        "thickness": 581.0499356089579
+      },
+      "position": {
+        "x": 433.51723478389556,
+        "y": -146.27321965586918,
+        "z": 233.99251234518627
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "aluminum_5052"
+    },
+    {
+      "index": 3,
+      "type": "panel",
+      "dimensions": {
+        "width": 609.5999999999999,
+        "height": 156.15809183621985,
+        "thickness": 4.7498
+      },
+      "position": {
+        "x": 130.15451105823468,
+        "y": -302.93131149208904,
+        "z": 439.58121229130484
+      },
+      "rotation": {
+        "rx": -0.06577422103864894,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "plywood_baltic_birch"
+    },
+    {
+      "index": 4,
+      "type": "panel",
+      "dimensions": {
+        "width": 249.8240921209013,
+        "height": 3.175,
+        "thickness": 384.48402988343236
+      },
+      "position": {
+        "x": 310.422058339739,
+        "y": -89.60190868263983,
+        "z": 0
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "mdf"
+    },
+    {
+      "index": 5,
+      "type": "panel",
+      "dimensions": {
+        "width": 6.35,
+        "height": 704.1681779480931,
+        "thickness": 656.189232200652
+      },
+      "position": {
+        "x": 403.08394665876983,
+        "y": -161.8502253244015,
+        "z": 0.773824881030527
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "mild_steel"
+    },
+    {
+      "index": 6,
+      "type": "panel",
+      "dimensions": {
+        "width": 609.5999999999999,
+        "height": 196.61762475632628,
+        "thickness": 12.7
+      },
+      "position": {
+        "x": 128.9921785547824,
+        "y": 21.440276229478215,
+        "z": 233.99251234518627
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": -0.19529137903917815,
+        "rz": 0.0
+      },
+      "material": "plywood_baltic_birch"
+    },
+    {
+      "index": 7,
+      "type": "panel",
+      "dimensions": {
+        "width": 301.7289255612201,
+        "height": 522.3951376964444,
+        "thickness": 6.35
+      },
+      "position": {
+        "x": 154.0985667826947,
+        "y": -555.9872338301038,
+        "z": 432.7312122913048
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "plywood_baltic_birch"
+    },
+    {
+      "index": 8,
+      "type": "panel",
+      "dimensions": {
+        "width": 1.5239999999999998,
+        "height": 694.6301257249488,
+        "thickness": 443.0071893770406
+      },
+      "position": {
+        "x": 435.71643606725064,
+        "y": -282.0929244138915,
+        "z": 0
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "mild_steel"
+    },
+    {
+      "index": 9,
+      "type": "panel",
+      "dimensions": {
+        "width": 732.4029173883332,
+        "height": 454.4605946632022,
+        "thickness": 3.429
+      },
+      "position": {
+        "x": 70.21918612122636,
+        "y": 514.0905493323421,
+        "z": 363.9040877601857
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "mild_steel"
+    },
+    {
+      "index": 10,
+      "type": "panel",
+      "dimensions": {
+        "width": 774.0109264887406,
+        "height": 50.0,
+        "thickness": 609.5999999999999
+      },
+      "position": {
+        "x": -331.1014158939759,
+        "y": 110.51022301030856,
+        "z": 0
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "plywood_baltic_birch"
+    },
+    {
+      "index": 11,
+      "type": "panel",
+      "dimensions": {
+        "width": 394.85410386097016,
+        "height": 681.1338026911747,
+        "thickness": 0.8128
+      },
+      "position": {
+        "x": 74.37914418969274,
+        "y": -571.4125938741399,
+        "z": 424.0086165635118
+      },
+      "rotation": {
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "material": "aluminum_5052"
+    },
+    {
+      "index": 12,
+      "type": "panel",
+      "dimensions": {
+        "width": 6.35,
+        "height": 122.53656518354592,
+        "thickness": 180.75487891384924
+      },
+      "position": {
+        "x": 225.6791482083436,
+        "y": -332.9542414757133,
+        "z": 486.42566193555734
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "plywood_baltic_birch"
+    },
+    {
+      "index": 13,
+      "type": "panel",
+      "dimensions": {
+        "width": 609.5999999999999,
+        "height": 344.1021397293111,
+        "thickness": 6.35
+      },
+      "position": {
+        "x": -306.862897383592,
+        "y": 4.383783039342575,
+        "z": 0
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "mdf"
+    }
+  ],
+  "connections": [
+    {
+      "from": 0,
+      "to": 1,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 1,
+      "to": 2,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 2,
+      "to": 3,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 1,
+      "to": 4,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 1,
+      "to": 5,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 1,
+      "to": 6,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 3,
+      "to": 7,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 1,
+      "to": 8,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 5,
+      "to": 9,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 1,
+      "to": 10,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 7,
+      "to": 11,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 3,
+      "to": 12,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "from": 10,
+      "to": 13,
+      "joint_type": "butt",
+      "anchor_from": [
+        0.5,
+        0.5,
+        0.0
+      ],
+      "anchor_to": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    }
+  ],
+  "fitness": {
+    "stability": 1.0,
+    "load_test": 1.0,
+    "mirror_symmetry_x": 0.0,
+    "mirror_symmetry_y": 0.0,
+    "rotational_symmetry": 0.0,
+    "proportion_score": 0.8936159261303214,
+    "balance_score": 0.9835796159668595,
+    "visual_weight_balance": 0.6615423565101684,
+    "material_efficiency": 0.0956907816345598,
+    "structural_efficiency": 0.009976104662446921,
+    "total": 0.6835862371439723
+  },
+  "novelty_score": 0.7448303697705227,
+  "fingerprint": [
+    0.9333333333333333,
+    0.24540047957490152,
+    0.46366645166736187,
+    0.6298092169862568,
+    0.2857142857142857,
+    0.35714285714285715,
+    0.35714285714285715,
+    0.0,
+    0.009396317291235563,
+    0.04276932906582742,
+    0.0,
+    0.21428571428571427,
+    1.2,
+    2.037074927304193,
+    0.14285714285714285,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ]
+}

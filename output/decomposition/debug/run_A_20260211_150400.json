@@ -1,0 +1,169 @@
+{
+  "timestamp_utc": "2026-02-11T23:04:00.655780+00:00",
+  "slot": "A",
+  "mode": "manufacturing",
+  "mesh_source": {
+    "path": "/Users/alexanderlamb/projects/text-to-furniture/uploads/generated_mesh.glb",
+    "vertices": 19115,
+    "faces": 29998,
+    "bounds": [
+      [
+        -0.9569410085678101,
+        -0.308445006608963,
+        -0.4460659921169281
+      ],
+      [
+        0.9550129771232605,
+        0.3062889873981476,
+        0.444256991147995
+      ]
+    ],
+    "extents": [
+      1.9119539856910706,
+      0.6147339940071106,
+      0.8903229832649231
+    ],
+    "watertight": false,
+    "surface_area": 4.612391472095538,
+    "volume": 0.12403886138414505
+  },
+  "mesh_viewer": {
+    "path": "/Users/alexanderlamb/projects/text-to-furniture/uploads/generated_mesh_normalized.glb",
+    "vertices": 19115,
+    "faces": 29998,
+    "bounds": [
+      [
+        -0.9559769630432129,
+        0.0,
+        -0.44516149163246155
+      ],
+      [
+        0.9559769630432129,
+        0.6147339940071106,
+        0.44516149163246155
+      ]
+    ],
+    "extents": [
+      1.9119539260864258,
+      0.6147339940071106,
+      0.8903229832649231
+    ],
+    "watertight": false,
+    "surface_area": 4.612391460076402,
+    "volume": 0.12403886116463896
+  },
+  "mesh_decomposition_mm": {
+    "bounds": [
+      [
+        -1166.4441304312854,
+        -542.9763965577371,
+        -7.470890997564903
+      ],
+      [
+        1181.6566912436697,
+        543.8652121618389,
+        764.0479504099203
+      ]
+    ],
+    "extents": [
+      2348.100821674955,
+      1086.841608719576,
+      771.5188414074852
+    ]
+  },
+  "parts_decomposition_mm_aabb": {
+    "min": [
+      -1171.1630234817035,
+      -547.7255213933339,
+      -7.470890997564908
+    ],
+    "max": [
+      1186.4191912436688,
+      543.865212161839,
+      768.8104504099323
+    ],
+    "extents": [
+      2357.582214725372,
+      1091.5907335551728,
+      776.2813414074972
+    ]
+  },
+  "parts_viewer_aabb": {
+    "min": [
+      -0.9331641489726114,
+      -0.005952687627623636,
+      -0.4333431876580586
+    ],
+    "max": [
+      0.9453200218278306,
+      0.6125759909540403,
+      0.4364190209165832
+    ],
+    "extents": [
+      1.878484170800442,
+      0.6185286785816639,
+      0.8697622085746418
+    ]
+  },
+  "fit_metrics": {
+    "decomp_height_ratio_parts_to_mesh": 1.0061728887804267,
+    "decomp_width_ratio_parts_to_mesh": 1.004037898612741,
+    "decomp_depth_ratio_parts_to_mesh": 1.0043696568087708,
+    "viewer_height_ratio_parts_to_mesh": 1.0061728887804267,
+    "viewer_width_ratio_parts_to_mesh": 0.9824944760282519,
+    "viewer_depth_ratio_parts_to_mesh": 0.9769063866970137
+  },
+  "decomposition_debug": {
+    "mesh_bounds_mm": [
+      [
+        -1166.4441304312854,
+        -542.9763965577371,
+        -7.470890997564903
+      ],
+      [
+        1181.6566912436697,
+        543.8652121618389,
+        764.0479504099203
+      ]
+    ],
+    "mesh_extents_mm": [
+      2348.100821674955,
+      1086.841608719576,
+      771.5188414074852
+    ],
+    "candidate_count": 116,
+    "selected_slab_count": 8,
+    "coverage_fraction": 0.6942952300816155,
+    "voxel_resolution_mm": 5.0,
+    "intersection_count": 15,
+    "joint_count": 15,
+    "dfm_error_count": 13,
+    "dfm_warning_count": 16,
+    "pose_alignment_fix": true,
+    "selected_source_histogram": {
+      "ransac": 8
+    },
+    "fit_ratios": [
+      0.9999814288427566,
+      0.9876362247302704,
+      0.9478350620698301
+    ]
+  },
+  "manufacturing_debug": {
+    "patch_count": 0,
+    "segment_count": 0,
+    "candidate_count": 0,
+    "assembly_steps": 8,
+    "dfm_errors": 13,
+    "dfm_warnings": 16
+  },
+  "run_config": {
+    "material": "plywood_baltic_birch",
+    "target_height_mm": 750.0,
+    "max_slabs": 8,
+    "coverage_target": 0.8,
+    "voxel_resolution_mm": 5.0,
+    "optimize_iterations": 50,
+    "run_simulation": true
+  }
+}

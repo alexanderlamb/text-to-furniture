@@ -43,6 +43,7 @@ yarn.lock
 # Environment
 .env
 .env.local
+.ui_settings.json
 
 # Output files
 *.stl
@@ -57,6 +58,11 @@ renders/
 *.pkl
 *.pt
 *.pth
+
+# Large data directories
+models/
+training_data/
+training_data_v2/
 
 # Logs
 *.log

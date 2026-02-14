@@ -1,0 +1,242 @@
+{
+  "design_id": 19,
+  "generation": 6,
+  "components": [
+    {
+      "index": 0,
+      "type": "panel",
+      "dimensions": {
+        "width": 50.0,
+        "height": 562.7139082637938,
+        "thickness": 464.1885356078191
+      },
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "rotation": {
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "material": "acrylic_clear"
+    },
+    {
+      "index": 1,
+      "type": "panel",
+      "dimensions": {
+        "width": 762.0,
+        "height": 4.7498,
+        "thickness": 609.5999999999999
+      },
+      "position": {
+        "x": -378.2843073903199,
+        "y": 591.5991359438286,
+        "z": 0
+      },
+      "rotation": {
+        "rx": 0.17222811317482362,
+        "ry": -0.08189030226259715,
+        "rz": -0.0409960789810941
+      },
+      "material": "plywood_baltic_birch"
+    },
+    {
+      "index": 2,
+      "type": "panel",
+      "dimensions": {
+        "width": 6.35,
+        "height": 484.616146715797,
+        "thickness": 101.59777550952438
+      },
+      "position": {
+        "x": -385.1343073903199,
+        "y": 351.9927405094443,
+        "z": 350.40428490304015
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "mdf"
+    },
+    {
+      "index": 3,
+      "type": "panel",
+      "dimensions": {
+        "width": 2.9972,
+        "height": 537.4827291931056,
+        "thickness": 609.5999999999999
+      },
+      "position": {
+        "x": 384.2156926096801,
+        "y": 325.9612691913337,
+        "z": 112.08156773578321
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "polycarbonate"
+    },
+    {
+      "index": 4,
+      "type": "panel",
+      "dimensions": {
+        "width": 543.5763412187027,
+        "height": 222.72147900767482,
+        "thickness": 3.429
+      },
+      "position": {
+        "x": -719.8909568102084,
+        "y": 75.27040198297243,
+        "z": 411.3658158085617
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": -0.25303307813469245,
+        "rz": -0.32189457025119983
+      },
+      "material": "mild_steel"
+    },
+    {
+      "index": 5,
+      "type": "panel",
+      "dimensions": {
+        "width": 724.8232834518125,
+        "height": 0.7619999999999999,
+        "thickness": 236.09162828384186
+      },
+      "position": {
+        "x": 23.24619932797333,
+        "y": 324.6992691913337,
+        "z": 347.2090264293253
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "mild_steel"
+    },
+    {
+      "index": 6,
+      "type": "panel",
+      "dimensions": {
+        "width": 50.0,
+        "height": 492.69777561152733,
+        "thickness": 592.9918301839128
+      },
+      "position": {
+        "x": 384.2156926096801,
+        "y": 295.07882354774074,
+        "z": 0
+      },
+      "rotation": {
+        "rx": 0.06978742961168001,
+        "ry": 0.12128116986665707,
+        "rz": -0.12647277551928102
+      },
+      "material": "plywood_baltic_birch"
+    },
+    {
+      "index": 7,
+      "type": "panel",
+      "dimensions": {
+        "width": 6.35,
+        "height": 609.5999999999999,
+        "thickness": 762.0
+      },
+      "position": {
+        "x": -16.783548206932558,
+        "y": -41.123545759811066,
+        "z": 0
+      },
+      "rotation": {
+        "rx": -0.119084311783468,
+        "ry": 0.2111267967248408,
+        "rz": 0.1745767078269731
+      },
+      "material": "plywood_baltic_birch"
+    },
+    {
+      "index": 8,
+      "type": "shelf",
+      "dimensions": {
+        "width": 248.02910514987389,
+        "height": 343.9965132474626,
+        "thickness": 19.049999999999997
+      },
+      "position": {
+        "x": -121.76665257493694,
+        "y": 123.55131134818302,
+        "z": 464.6885356078191
+      },
+      "rotation": {
+        "rx": -0.13347939098779285,
+        "ry": -0.1057930862077014,
+        "rz": 0.13376499990573754
+      },
+      "material": "plywood_baltic_birch"
+    },
+    {
+      "index": 9,
+      "type": "panel",
+      "dimensions": {
+        "width": 692.5878095783175,
+        "height": 390.6167090566932,
+        "thickness": 3.429
+      },
+      "position": {
+        "x": -75.43588773015942,
+        "y": 90.16648164159818,
+        "z": 659.3174821335408
+      },
+      "rotation": {
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0
+      },
+      "material": "mild_steel"
+    }
+  ],
+  "fitness": {
+    "stability": 1.0,
+    "load_test": 1.0,
+    "mirror_symmetry_x": 0.04194888892545394,
+    "mirror_symmetry_y": 0.0,
+    "rotational_symmetry": 0.0,
+    "proportion_score": 0.9243890920897021,
+    "balance_score": 0.8089763088567006,
+    "visual_weight_balance": 0.6012056888455021,
+    "material_efficiency": 0.12260818583630395,
+    "structural_efficiency": 0.010237028917844625,
+    "total": 0.6705370268613456
+  },
+  "novelty_score": 0.4211977098735771,
+  "fingerprint": [
+    0.6666666666666666,
+    0.5409437357084378,
+    0.6421524232677139,
+    0.3956988382083335,
+    0.0,
+    0.3,
+    0.6,
+    0.1,
+    0.09891584911155289,
+    0.1546248866392978,
+    0.15954102649685714,
+    0.5,
+    1.0,
+    1.379966195255862,
+    0.2,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ]
+}

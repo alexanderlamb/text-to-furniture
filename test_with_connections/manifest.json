@@ -1,0 +1,74 @@
+{
+  "total_designs": 9,
+  "evolution_config": {
+    "population_size": 10,
+    "generations": 3,
+    "archive_size": 20
+  },
+  "min_fitness": 0.3,
+  "designs": [
+    {
+      "design_id": 0,
+      "generation": 0,
+      "num_components": 8,
+      "json_path": "test_with_connections/designs/design_0000/design.json",
+      "urdf_path": "test_with_connections/designs/design_0000/model.urdf"
+    },
+    {
+      "design_id": 1,
+      "generation": 0,
+      "num_components": 11,
+      "json_path": "test_with_connections/designs/design_0001/design.json",
+      "urdf_path": "test_with_connections/designs/design_0001/model.urdf"
+    },
+    {
+      "design_id": 2,
+      "generation": 2,
+      "num_components": 9,
+      "json_path": "test_with_connections/designs/design_0002/design.json",
+      "urdf_path": "test_with_connections/designs/design_0002/model.urdf"
+    },
+    {
+      "design_id": 3,
+      "generation": 2,
+      "num_components": 9,
+      "json_path": "test_with_connections/designs/design_0003/design.json",
+      "urdf_path": "test_with_connections/designs/design_0003/model.urdf"
+    },
+    {
+      "design_id": 4,
+      "generation": 2,
+      "num_components": 14,
+      "json_path": "test_with_connections/designs/design_0004/design.json",
+      "urdf_path": "test_with_connections/designs/design_0004/model.urdf"
+    },
+    {
+      "design_id": 5,
+      "generation": 3,
+      "num_components": 14,
+      "json_path": "test_with_connections/designs/design_0005/design.json",
+      "urdf_path": "test_with_connections/designs/design_0005/model.urdf"
+    },
+    {
+      "design_id": 6,
+      "generation": 3,
+      "num_components": 9,
+      "json_path": "test_with_connections/designs/design_0006/design.json",
+      "urdf_path": "test_with_connections/designs/design_0006/model.urdf"
+    },
+    {
+      "design_id": 7,
+      "generation": 4,
+      "num_components": 11,
+      "json_path": "test_with_connections/designs/design_0007/design.json",
+      "urdf_path": "test_with_connections/designs/design_0007/model.urdf"
+    },
+    {
+      "design_id": 8,
+      "generation": 1,
+      "num_components": 8,
+      "json_path": "test_with_connections/designs/design_0008/design.json",
+      "urdf_path": "test_with_connections/designs/design_0008/model.urdf"
+    }
+  ]
+}

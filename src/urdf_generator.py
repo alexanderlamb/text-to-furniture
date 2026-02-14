@@ -43,6 +43,12 @@ def component_to_link(component: Component, link_name: str) -> ET.Element:
     """
     Convert a furniture component to a URDF link element.
     
+    The component's profile defines the X-Y footprint, and thickness defines Z.
+    For URDF boxes, we use:
+      - X size = profile width (dims[0])
+      - Y size = profile height/depth (dims[1]) 
+      - Z size = thickness (dims[2])
+    
     Args:
         component: Furniture component
         link_name: Name for the URDF link
@@ -50,20 +56,27 @@ def component_to_link(component: Component, link_name: str) -> ET.Element:
     Returns:
         XML Element for the link
     """
-    dims = component.get_dimensions()
+    dims = component.get_dimensions()  # (width, depth, thickness) in mm
     
     # Convert mm to meters for URDF
-    width_m = dims[0] / 1000.0
-    depth_m = dims[1] / 1000.0
-    height_m = dims[2] / 1000.0
+    # The box dimensions in URDF are (size_x, size_y, size_z)
+    size_x = dims[0] / 1000.0  # width
+    size_y = dims[1] / 1000.0  # depth  
+    size_z = dims[2] / 1000.0  # thickness/height
+    
+    # Ensure minimum size to avoid physics issues
+    size_x = max(size_x, 0.001)
+    size_y = max(size_y, 0.001)
+    size_z = max(size_z, 0.001)
     
     # Calculate mass from density
     density = MATERIAL_DENSITIES.get(component.material, 700)
-    volume = width_m * depth_m * height_m
+    volume = size_x * size_y * size_z
     mass = density * volume
+    mass = max(mass, 0.01)  # Minimum mass to avoid physics instability
     
     # Compute inertia
-    ixx, iyy, izz = compute_box_inertia(mass, width_m, depth_m, height_m)
+    ixx, iyy, izz = compute_box_inertia(mass, size_x, size_y, size_z)
     
     # Create link element
     link = ET.Element("link", name=link_name)
@@ -80,7 +93,7 @@ def component_to_link(component: Component, link_name: str) -> ET.Element:
     visual = ET.SubElement(link, "visual")
     ET.SubElement(visual, "origin", xyz="0 0 0", rpy="0 0 0")
     vis_geometry = ET.SubElement(visual, "geometry")
-    ET.SubElement(vis_geometry, "box", size=f"{width_m:.6f} {depth_m:.6f} {height_m:.6f}")
+    ET.SubElement(vis_geometry, "box", size=f"{size_x:.6f} {size_y:.6f} {size_z:.6f}")
     
     # Material color based on component type
     material = ET.SubElement(visual, "material", name=f"{link_name}_material")
@@ -97,7 +110,7 @@ def component_to_link(component: Component, link_name: str) -> ET.Element:
     collision = ET.SubElement(link, "collision")
     ET.SubElement(collision, "origin", xyz="0 0 0", rpy="0 0 0")
     col_geometry = ET.SubElement(collision, "geometry")
-    ET.SubElement(col_geometry, "box", size=f"{width_m:.6f} {depth_m:.6f} {height_m:.6f}")
+    ET.SubElement(col_geometry, "box", size=f"{size_x:.6f} {size_y:.6f} {size_z:.6f}")
     
     return link
 
@@ -148,8 +161,12 @@ def furniture_to_urdf(design: FurnitureDesign,
     robot = ET.Element("robot", name=design.name)
     
     # Add base link (required for URDF)
+    # Give it minimal inertial properties to avoid PyBullet warnings
     base_link = ET.SubElement(robot, "link", name="base_link")
-    # Empty base link - just a reference point
+    base_inertial = ET.SubElement(base_link, "inertial")
+    ET.SubElement(base_inertial, "mass", value="0.001")
+    ET.SubElement(base_inertial, "origin", xyz="0 0 0", rpy="0 0 0")
+    ET.SubElement(base_inertial, "inertia", ixx="0.000001", ixy="0", ixz="0", iyy="0.000001", iyz="0", izz="0.000001")
     
     # Add all components as links
     for i, component in enumerate(design.components):
@@ -227,34 +244,31 @@ def save_urdf_temp(design: FurnitureDesign, fixed_base: bool = False) -> str:
 
 
 if __name__ == "__main__":
-    # Test URDF generation
-    from templates import create_simple_table
-    from genome import create_table_genome, create_shelf_genome
-    
-    # Test with simple table
+    import numpy as np
+    from furniture import Component, ComponentType, FurnitureDesign
+
     print("Testing URDF generation...")
-    
-    table = create_simple_table(
-        height=750,
-        top_width=1200,
-        top_depth=800,
-    )
-    
+
+    table = FurnitureDesign(name="test_table")
+    table.add_component(Component(
+        name="top", type=ComponentType.PANEL,
+        profile=[(0, 0), (1200, 0), (1200, 800), (0, 800)],
+        thickness=19.0, material="plywood",
+        position=np.array([0.0, 0.0, 750.0]),
+    ))
+    for i, (x, y) in enumerate([(50, 50), (1100, 50), (50, 700), (1100, 700)]):
+        table.add_component(Component(
+            name=f"leg_{i}", type=ComponentType.LEG,
+            profile=[(0, 0), (50, 0), (50, 50), (0, 50)],
+            thickness=750.0, material="plywood",
+            position=np.array([float(x), float(y), 0.0]),
+        ))
+
     urdf_path = save_urdf_temp(table)
     print(f"Saved table URDF to: {urdf_path}")
-    
-    # Print first 50 lines
+    print(f"Components: {len(table.components)}")
+
     with open(urdf_path, 'r') as f:
         lines = f.readlines()[:50]
         print("\nURDF preview (first 50 lines):")
         print("".join(lines))
-    
-    # Test with genome-generated furniture
-    print("\n" + "="*50)
-    print("Testing with genome-generated table...")
-    
-    genome = create_table_genome()
-    design = genome.to_furniture_design("genome_table")
-    urdf_path2 = save_urdf_temp(design)
-    print(f"Saved genome table URDF to: {urdf_path2}")
-    print(f"Components: {len(design.components)}")

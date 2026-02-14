@@ -1,0 +1,95 @@
+{
+  "timestamp_utc": "2026-02-11T10:02:20.945891+00:00",
+  "slot": "A",
+  "mode": "manufacturing",
+  "mesh_source": {
+    "path": "/Users/alexanderlamb/projects/text-to-furniture/uploads/generated_mesh.glb",
+    "vertices": 19115,
+    "faces": 29998,
+    "bounds": [
+      [
+        -0.9569410085678101,
+        -0.308445006608963,
+        -0.4460659921169281
+      ],
+      [
+        0.9550129771232605,
+        0.3062889873981476,
+        0.444256991147995
+      ]
+    ],
+    "extents": [
+      1.9119539856910706,
+      0.6147339940071106,
+      0.8903229832649231
+    ],
+    "watertight": false,
+    "surface_area": 4.612391472095538,
+    "volume": 0.12403886138414505
+  },
+  "mesh_viewer": {
+    "path": "/Users/alexanderlamb/projects/text-to-furniture/uploads/generated_mesh_normalized.glb",
+    "vertices": 19115,
+    "faces": 29998,
+    "bounds": [
+      [
+        -0.9559769630432129,
+        0.0,
+        -0.44516149163246155
+      ],
+      [
+        0.9559769630432129,
+        0.6147339940071106,
+        0.44516149163246155
+      ]
+    ],
+    "extents": [
+      1.9119539260864258,
+      0.6147339940071106,
+      0.8903229832649231
+    ],
+    "watertight": false,
+    "surface_area": 4.612391460076402,
+    "volume": 0.12403886116463896
+  },
+  "mesh_decomposition_mm": {
+    "bounds": [
+      [
+        -1166.3300738593257,
+        -543.1147813187054,
+        0.0
+      ],
+      [
+        1166.3300738593257,
+        543.1147813187054,
+        750.0
+      ]
+    ],
+    "extents": [
+      2332.6601477186514,
+      1086.2295626374107,
+      750.0
+    ]
+  },
+  "parts_decomposition_mm_aabb": null,
+  "parts_viewer_aabb": null,
+  "fit_metrics": {},
+  "decomposition_debug": {},
+  "manufacturing_debug": {
+    "patch_count": 0,
+    "segment_count": 0,
+    "candidate_count": 0,
+    "assembly_steps": 0,
+    "dfm_errors": 0,
+    "dfm_warnings": 0
+  },
+  "run_config": {
+    "material": "plywood_baltic_birch",
+    "target_height_mm": 750.0,
+    "max_slabs": 15,
+    "coverage_target": 0.7,
+    "voxel_resolution_mm": 5.0,
+    "optimize_iterations": 50,
+    "run_simulation": false
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "generation": 0,
+  "archive_size": 2,
+  "designs": [
+    {
+      "generation": 0,
+      "fitness": {
+        "stability": 1.0,
+        "load_test": 1.0,
+        "mirror_symmetry_x": 0.04741821492091454,
+        "mirror_symmetry_y": 0.0,
+        "rotational_symmetry": 0.0,
+        "proportion_score": 0.8697262232075359,
+        "balance_score": 0.8729751501403543,
+        "visual_weight_balance": 0.5451698826574385,
+        "material_efficiency": 0.16014046873059795,
+        "structural_efficiency": 0.014301641707272493,
+        "total": 0.6721126921507208
+      },
+      "novelty": 1.0,
+      "num_components": 10,
+      "fingerprint": [
+        0.6666666666666666,
+        0.289390249705142,
+        0.3719516827910411,
+        0.4284314844401524,
+        0.0,
+        0.7,
+        0.3,
+        0.0,
+        0.0,
+        0.03115468291569732,
+        0.0,
+        0.1,
+        0.8,
+        0.8876658849052418,
+        0.2,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "generation": 0,
+      "fitness": {
+        "stability": 1.0,
+        "load_test": 1.0,
+        "mirror_symmetry_x": 0.0,
+        "mirror_symmetry_y": 0.0,
+        "rotational_symmetry": 0.0,
+        "proportion_score": 0.9105630875886788,
+        "balance_score": 0.5594172619866553,
+        "visual_weight_balance": 0.5479847275700529,
+        "material_efficiency": 0.04735976950170917,
+        "structural_efficiency": 0.044201862094200184,
+        "total": 0.6375188688992108
+      },
+      "novelty": 1.0,
+      "num_components": 5,
+      "fingerprint": [
+        0.3333333333333333,
+        0.22644298748470626,
+        0.4350855365182762,
+        0.6404636936816328,
+        0.0,
+        0.8,
+        0.2,
+        0.0,
+        0.014913371876002567,
+        0.0,
+        0.0,
+        0.2,
+        0.6,
+        0.8980226614157334,
+        0.4,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ]
+}

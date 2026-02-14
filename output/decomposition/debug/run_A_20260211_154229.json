@@ -1,0 +1,326 @@
+{
+  "timestamp_utc": "2026-02-11T23:42:29.158579+00:00",
+  "slot": "A",
+  "mode": "manufacturing",
+  "mesh_source": {
+    "path": "/Users/alexanderlamb/projects/text-to-furniture/uploads/generated_mesh.glb",
+    "vertices": 19115,
+    "faces": 29998,
+    "bounds": [
+      [
+        -0.9569410085678101,
+        -0.308445006608963,
+        -0.4460659921169281
+      ],
+      [
+        0.9550129771232605,
+        0.3062889873981476,
+        0.444256991147995
+      ]
+    ],
+    "extents": [
+      1.9119539856910706,
+      0.6147339940071106,
+      0.8903229832649231
+    ],
+    "watertight": false,
+    "surface_area": 4.612391472095538,
+    "volume": 0.12403886138414505
+  },
+  "mesh_viewer": {
+    "path": "/Users/alexanderlamb/projects/text-to-furniture/uploads/generated_mesh_normalized.glb",
+    "vertices": 19115,
+    "faces": 29998,
+    "bounds": [
+      [
+        -0.9559769630432129,
+        0.0,
+        -0.44516149163246155
+      ],
+      [
+        0.9559769630432129,
+        0.6147339940071106,
+        0.44516149163246155
+      ]
+    ],
+    "extents": [
+      1.9119539260864258,
+      0.6147339940071106,
+      0.8903229832649231
+    ],
+    "watertight": false,
+    "surface_area": 4.612391460076402,
+    "volume": 0.12403886116463896
+  },
+  "mesh_decomposition_mm": {
+    "bounds": [
+      [
+        -1166.4441304312854,
+        -542.9763965577371,
+        -7.470890997564903
+      ],
+      [
+        1181.6566912436697,
+        543.8652121618389,
+        764.0479504099203
+      ]
+    ],
+    "extents": [
+      2348.100821674955,
+      1086.841608719576,
+      771.5188414074852
+    ]
+  },
+  "parts_decomposition_mm_aabb": {
+    "min": [
+      -1171.1630234817035,
+      -547.7255213933339,
+      -12.233390997564893
+    ],
+    "max": [
+      1186.4191912436688,
+      543.865212161839,
+      768.8104504099323
+    ],
+    "extents": [
+      2357.582214725372,
+      1091.5907335551728,
+      781.0438414074972
+    ]
+  },
+  "parts_viewer_aabb": {
+    "min": [
+      -0.9331641489726114,
+      -0.00974737220216739,
+      -0.4333431876580586
+    ],
+    "max": [
+      0.9453200218278306,
+      0.6125759909540403,
+      0.4364190209165832
+    ],
+    "extents": [
+      1.878484170800442,
+      0.6223233631562076,
+      0.8697622085746418
+    ]
+  },
+  "fit_metrics": {
+    "decomp_height_ratio_parts_to_mesh": 1.0123457775608378,
+    "decomp_width_ratio_parts_to_mesh": 1.004037898612741,
+    "decomp_depth_ratio_parts_to_mesh": 1.0043696568087708,
+    "viewer_height_ratio_parts_to_mesh": 1.0123457775608375,
+    "viewer_width_ratio_parts_to_mesh": 0.9824944760282519,
+    "viewer_depth_ratio_parts_to_mesh": 0.9769063866970137
+  },
+  "decomposition_debug": {
+    "mesh_bounds_mm": [
+      [
+        -1166.4441304312854,
+        -542.9763965577371,
+        -7.470890997564903
+      ],
+      [
+        1181.6566912436697,
+        543.8652121618389,
+        764.0479504099203
+      ]
+    ],
+    "mesh_extents_mm": [
+      2348.100821674955,
+      1086.841608719576,
+      771.5188414074852
+    ],
+    "candidate_count": 116,
+    "selected_slab_count": 14,
+    "coverage_fraction": 0.7194037682003308,
+    "voxel_resolution_mm": 5.0,
+    "intersection_count": 23,
+    "joint_count": 23,
+    "dfm_error_count": 17,
+    "dfm_warning_count": 27,
+    "pose_alignment_fix": true,
+    "selected_source_histogram": {
+      "ransac": 14
+    },
+    "selection_trace": [
+      {
+        "iteration": 1,
+        "candidate_index": 0,
+        "source": "ransac",
+        "width_mm": 1086.841608719576,
+        "height_mm": 2348.100821674955,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 100694,
+        "coverage_after": 0.3221558533799586,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 2,
+        "candidate_index": 1,
+        "source": "ransac",
+        "width_mm": 1073.4175184799794,
+        "height_mm": 1878.4806573399642,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 63414,
+        "coverage_after": 0.5250397519859996,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 3,
+        "candidate_index": 2,
+        "source": "ransac",
+        "width_mm": 1073.4175184799794,
+        "height_mm": 1073.4175184799794,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 31616,
+        "coverage_after": 0.6261905599831074,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 4,
+        "candidate_index": 3,
+        "source": "ransac",
+        "width_mm": 2314.5565242224557,
+        "height_mm": 100.63289235749801,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 7147,
+        "coverage_after": 0.6490563502397917,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 5,
+        "candidate_index": 4,
+        "source": "ransac",
+        "width_mm": 2314.5565242224557,
+        "height_mm": 100.74830017431805,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 5414,
+        "coverage_after": 0.666377658264094,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 6,
+        "candidate_index": 8,
+        "source": "ransac",
+        "width_mm": 1086.841608719576,
+        "height_mm": 100.74830017431805,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 3391,
+        "coverage_after": 0.6772266711031056,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 7,
+        "candidate_index": 10,
+        "source": "ransac",
+        "width_mm": 1073.4175184799794,
+        "height_mm": 67.08859490499867,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 2795,
+        "coverage_after": 0.6861688683561394,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 8,
+        "candidate_index": 6,
+        "source": "ransac",
+        "width_mm": 737.9745439549858,
+        "height_mm": 80.49246494798007,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 2540,
+        "coverage_after": 0.6942952300816155,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 9,
+        "candidate_index": 11,
+        "source": "ransac",
+        "width_mm": 744.7197807364557,
+        "height_mm": 80.49246494798007,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 2093,
+        "coverage_after": 0.7009914801176083,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 10,
+        "candidate_index": 12,
+        "source": "ransac",
+        "width_mm": 670.8859490499872,
+        "height_mm": 67.08859490499871,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 1893,
+        "coverage_after": 0.7070478591515951,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 11,
+        "candidate_index": 14,
+        "source": "ransac",
+        "width_mm": 872.1517337649832,
+        "height_mm": 33.544297452499336,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 1224,
+        "coverage_after": 0.7109638696838717,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 12,
+        "candidate_index": 7,
+        "source": "ransac",
+        "width_mm": 711.0167737071572,
+        "height_mm": 40.31054028620372,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 970,
+        "coverage_after": 0.7140672440436008,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 13,
+        "candidate_index": 9,
+        "source": "ransac",
+        "width_mm": 737.9745439549858,
+        "height_mm": 100.63289235749801,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 870,
+        "coverage_after": 0.7168506829023269,
+        "dfm_rejected": false
+      },
+      {
+        "iteration": 14,
+        "candidate_index": 15,
+        "source": "ransac",
+        "width_mm": 764.6784170058106,
+        "height_mm": 67.08859490499867,
+        "thickness_mm": 9.524999999999999,
+        "new_voxels": 798,
+        "coverage_after": 0.7194037682003308,
+        "dfm_rejected": false
+      }
+    ],
+    "selection_stop_reason": "below_min_contribution",
+    "fit_ratios": [
+      0.9999814288427566,
+      0.9876362247302704,
+      1.0000000000000155
+    ]
+  },
+  "manufacturing_debug": {
+    "patch_count": 0,
+    "segment_count": 0,
+    "candidate_count": 0,
+    "assembly_steps": 14,
+    "dfm_errors": 17,
+    "dfm_warnings": 27
+  },
+  "run_config": {
+    "material": "plywood_baltic_birch",
+    "target_height_mm": 750.0,
+    "max_slabs": 15,
+    "coverage_target": 0.8,
+    "voxel_resolution_mm": 5.0,
+    "optimize_iterations": 50,
+    "run_simulation": true
+  }
+}

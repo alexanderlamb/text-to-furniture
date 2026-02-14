@@ -1,0 +1,226 @@
+<?xml version="1.0" ?>
+<robot name="evolved_design">
+  <link name="base_link">
+    <inertial>
+      <mass value="0.001"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+  </link>
+  <link name="link_comp_0">
+    <inertial>
+      <mass value="0.838824"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.039485466" ixy="0" ixz="0" iyy="0.015063259" iyz="0" izz="0.024425033"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.004496 0.591099 0.464189"/>
+      </geometry>
+      <material name="link_comp_0_material">
+        <color rgba="0.8 0.7 0.5 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.004496 0.591099 0.464189"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_link_to_link_comp_0" type="fixed">
+    <parent link="base_link"/>
+    <child link="link_comp_0"/>
+    <origin xyz="0.002248 0.295550 0.232094" rpy="0.000000 0.000000 0.000000"/>
+  </joint>
+  <link name="link_comp_1">
+    <inertial>
+      <mass value="1.500321"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.046464279" ixy="0" ixz="0" iyy="0.119057487" iyz="0" izz="0.072598849"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.762000 0.004750 0.609600"/>
+      </geometry>
+      <material name="link_comp_1_material">
+        <color rgba="0.8 0.7 0.5 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.762000 0.004750 0.609600"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_link_to_link_comp_1" type="fixed">
+    <parent link="base_link"/>
+    <child link="link_comp_1"/>
+    <origin xyz="0.002716 0.593974 0.304800" rpy="0.000000 0.000000 0.000000"/>
+  </joint>
+  <link name="link_comp_2">
+    <inertial>
+      <mass value="0.212601"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.004343697" ixy="0" ixz="0" iyy="0.000183588" iyz="0" izz="0.004161537"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.006350 0.484616 0.101598"/>
+      </geometry>
+      <material name="link_comp_2_material">
+        <color rgba="0.8 0.7 0.5 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.006350 0.484616 0.101598"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_link_to_link_comp_2" type="fixed">
+    <parent link="base_link"/>
+    <child link="link_comp_2"/>
+    <origin xyz="-0.381959 0.594301 0.401203" rpy="-0.157783 0.189511 -0.115635"/>
+  </joint>
+  <link name="link_comp_3">
+    <inertial>
+      <mass value="0.667781"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.036755775" ixy="0" ixz="0" iyy="0.020680131" iyz="0" izz="0.016076644"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.002997 0.537483 0.609600"/>
+      </geometry>
+      <material name="link_comp_3_material">
+        <color rgba="0.8 0.7 0.5 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.002997 0.537483 0.609600"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_link_to_link_comp_3" type="fixed">
+    <parent link="base_link"/>
+    <child link="link_comp_3"/>
+    <origin xyz="0.373635 0.601388 0.402598" rpy="0.000000 0.000000 0.000000"/>
+  </joint>
+  <link name="link_comp_4">
+    <inertial>
+      <mass value="0.402039"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.002556598" ixy="0" ixz="0" iyy="0.015226902" iyz="0" izz="0.017782824"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.674151 0.276222 0.003175"/>
+      </geometry>
+      <material name="link_comp_4_material">
+        <color rgba="0.8 0.7 0.5 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.674151 0.276222 0.003175"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_link_to_link_comp_4" type="fixed">
+    <parent link="base_link"/>
+    <child link="link_comp_4"/>
+    <origin xyz="-0.386332 0.191987 0.445941" rpy="0.000000 -0.253033 -0.321895"/>
+  </joint>
+  <link name="link_comp_6">
+    <inertial>
+      <mass value="3.057755"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.180447841" ixy="0" ixz="0" iyy="0.089643326" iyz="0" izz="0.090886713"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.012700 0.597092 0.592992"/>
+      </geometry>
+      <material name="link_comp_6_material">
+        <color rgba="0.8 0.7 0.5 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.012700 0.597092 0.592992"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_link_to_link_comp_6" type="fixed">
+    <parent link="base_link"/>
+    <child link="link_comp_6"/>
+    <origin xyz="0.390566 0.593625 0.296496" rpy="0.000000 0.000000 0.000000"/>
+  </joint>
+  <link name="link_comp_7">
+    <inertial>
+      <mass value="0.050144"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.001554373" ixy="0" ixz="0" iyy="0.000001685" iyz="0" izz="0.001553025"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.006350 0.609600 0.019050"/>
+      </geometry>
+      <material name="link_comp_7_material">
+        <color rgba="0.8 0.7 0.5 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.006350 0.609600 0.019050"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_link_to_link_comp_7" type="fixed">
+    <parent link="base_link"/>
+    <child link="link_comp_7"/>
+    <origin xyz="0.008171 0.242731 0.009525" rpy="0.000000 0.390684 0.000000"/>
+  </joint>
+  <link name="link_comp_8">
+    <inertial>
+      <mass value="1.105250"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.010932444" ixy="0" ixz="0" iyy="0.005699530" iyz="0" izz="0.016565124"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.248029 0.343997 0.019050"/>
+      </geometry>
+      <material name="link_comp_8_material">
+        <color rgba="0.7 0.6 0.4 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.248029 0.343997 0.019050"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_link_to_link_comp_8" type="fixed">
+    <parent link="base_link"/>
+    <child link="link_comp_8"/>
+    <origin xyz="0.002248 0.295550 0.474214" rpy="0.100901 -0.095117 0.083808"/>
+  </joint>
+</robot>

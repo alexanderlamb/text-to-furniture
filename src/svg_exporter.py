@@ -94,7 +94,27 @@ def component_to_svg(
     if points:
         polygon = dwg.polygon(points, class_="cut")
         dwg.add(polygon)
-    
+
+    # Draw cutout features (slots, holes) from Component.features
+    for feature in getattr(component, 'features', []):
+        if not isinstance(feature, dict):
+            continue
+        feat_type = feature.get("type", "")
+        if feat_type in ("slot", "finger_slot", "bolt_hole", "dogbone"):
+            # Features with "outline" key contain polygon coords
+            outline = feature.get("outline")
+            if outline and isinstance(outline, (list, tuple)):
+                cutout_points = []
+                for fx, fy in outline:
+                    cutout_points.append((margin + fx * scale, margin + fy * scale))
+                if cutout_points:
+                    dwg.add(dwg.polygon(cutout_points, class_="cut"))
+        elif feat_type == "engrave":
+            coords = feature.get("coords")
+            if coords and isinstance(coords, (list, tuple)) and len(coords) >= 2:
+                engrave_points = [(margin + x * scale, margin + y * scale) for x, y in coords]
+                dwg.add(dwg.polyline(engrave_points, class_="engrave"))
+
     # Add component label
     if add_labels:
         label_x = margin + width / 2
@@ -291,36 +311,32 @@ def design_to_nested_svg(
 
 
 if __name__ == "__main__":
-    from templates import create_simple_table
-    from genome import create_table_genome
-    
-    # Test with simple table
+    import numpy as np
+    from furniture import Component, ComponentType, FurnitureDesign
+
     print("Testing SVG export...")
-    
-    table = create_simple_table()
-    
-    # Export individual SVGs
-    output_dir = "/Users/alexanderlamb/projects/text-to-furniture/examples/svg_output"
+
+    table = FurnitureDesign(name="test_table")
+    table.add_component(Component(
+        name="top", type=ComponentType.PANEL,
+        profile=[(0, 0), (800, 0), (800, 500), (0, 500)],
+        thickness=19.0, material="plywood",
+        position=np.array([0.0, 0.0, 700.0]),
+    ))
+    for i, (x, y) in enumerate([(20, 20), (720, 20), (20, 420), (720, 420)]):
+        table.add_component(Component(
+            name=f"leg_{i}", type=ComponentType.LEG,
+            profile=[(0, 0), (60, 0), (60, 60), (0, 60)],
+            thickness=700.0, material="plywood",
+            position=np.array([float(x), float(y), 0.0]),
+        ))
+
+    output_dir = os.path.join(os.path.dirname(__file__), "..", "examples", "svg_output")
     paths = design_to_svg(table, output_dir)
     print(f"\nExported {len(paths)} component SVGs to {output_dir}")
     for p in paths:
         print(f"  - {os.path.basename(p)}")
-    
-    # Export nested SVG
+
     nested_path = os.path.join(output_dir, f"{table.name}_nested.svg")
     design_to_nested_svg(table, nested_path)
     print(f"\nExported nested layout to {nested_path}")
-    
-    # Test with genome-generated table
-    print("\n" + "="*50)
-    print("Testing with genome-generated design...")
-    
-    genome = create_table_genome()
-    design = genome.to_furniture_design("genome_table")
-    
-    paths = design_to_svg(design, output_dir)
-    print(f"Exported {len(paths)} genome component SVGs")
-    
-    nested_path = os.path.join(output_dir, f"{design.name}_nested.svg")
-    design_to_nested_svg(design, nested_path)
-    print(f"Exported nested layout to {nested_path}")

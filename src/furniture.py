@@ -13,6 +13,7 @@ class JointType(Enum):
     FINGER = "finger"
     THROUGH_BOLT = "through_bolt"
     BUTT = "butt"
+    HALF_LAP = "half_lap"
 
 
 class ComponentType(Enum):
@@ -22,6 +23,8 @@ class ComponentType(Enum):
     SHELF = "shelf"
     SUPPORT = "support"
     BRACE = "brace"
+    SEAT = "seat"
+    BACK = "back"
 
 
 @dataclass
@@ -45,7 +48,8 @@ class Component:
     position: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))
     rotation: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))
     material: str = "plywood"
-    
+    features: List[Dict] = field(default_factory=list)
+
     def get_dimensions(self) -> Tuple[float, float, float]:
         """Get bounding box dimensions (width, depth, height)."""
         if not self.profile:

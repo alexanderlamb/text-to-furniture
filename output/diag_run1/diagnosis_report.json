@@ -1,0 +1,370 @@
+{
+  "version": "1.0.0",
+  "mesh_path": "models/table_test.stl",
+  "timestamp": "2026-02-11T23:20:58.422578+00:00",
+  "config_snapshot": {
+    "max_slabs": 15,
+    "coverage_target": 0.8,
+    "min_coverage_contribution": 0.002,
+    "voxel_resolution_mm": 5.0,
+    "dfm_check": true,
+    "default_material": "plywood_baltic_birch",
+    "target_height_mm": 700.0,
+    "joint_proximity_mm": 25.0,
+    "pose_alignment_fix": true
+  },
+  "mesh_faces": 60,
+  "mesh_extents_mm": [
+    800.0,
+    500.0,
+    700.0
+  ],
+  "candidate_generation": {
+    "total": 25,
+    "by_source": {
+      "ransac": 6
+    },
+    "after_dedupe": 25
+  },
+  "selection_trace": [
+    {
+      "iteration": 1,
+      "candidate_index": 1,
+      "source": "ransac",
+      "width_mm": 500.0,
+      "height_mm": 800.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 16259,
+      "coverage_after": 0.0,
+      "dfm_rejected": true,
+      "dfm_reason": "Part height 800.0mm exceeds sheet height 762.0mm"
+    },
+    {
+      "iteration": 1,
+      "candidate_index": 0,
+      "source": "ransac",
+      "width_mm": 500.0,
+      "height_mm": 800.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 15804,
+      "coverage_after": 0.0,
+      "dfm_rejected": true,
+      "dfm_reason": "Part height 800.0mm exceeds sheet height 762.0mm"
+    },
+    {
+      "iteration": 1,
+      "candidate_index": 2,
+      "source": "ransac",
+      "width_mm": 800.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 3296,
+      "coverage_after": 0.0,
+      "dfm_rejected": true,
+      "dfm_reason": "Part width 800.0mm exceeds sheet width 609.6mm"
+    },
+    {
+      "iteration": 1,
+      "candidate_index": 4,
+      "source": "ransac",
+      "width_mm": 500.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 3176,
+      "coverage_after": 0.061835598302246796,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 2,
+      "candidate_index": 6,
+      "source": "ransac",
+      "width_mm": 500.0,
+      "height_mm": 680.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 3006,
+      "coverage_after": 0.12036135664499047,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 3,
+      "candidate_index": 5,
+      "source": "ransac",
+      "width_mm": 500.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 2636,
+      "coverage_after": 0.17168334566410964,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 4,
+      "candidate_index": 3,
+      "source": "ransac",
+      "width_mm": 800.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 2071,
+      "coverage_after": 0.17168334566410964,
+      "dfm_rejected": true,
+      "dfm_reason": "Part width 800.0mm exceeds sheet width 609.6mm"
+    },
+    {
+      "iteration": 4,
+      "candidate_index": 9,
+      "source": "ransac",
+      "width_mm": 40.0,
+      "height_mm": 680.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 1088,
+      "coverage_after": 0.1928663214049297,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 5,
+      "candidate_index": 8,
+      "source": "ransac",
+      "width_mm": 40.0,
+      "height_mm": 680.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 952,
+      "coverage_after": 0.21140142517814728,
+      "dfm_rejected": false
+    },
+    {
+      "iteration": 6,
+      "candidate_index": 7,
+      "source": "ransac",
+      "width_mm": 40.0,
+      "height_mm": 680.0,
+      "thickness_mm": 9.524999999999999,
+      "new_voxels": 822,
+      "coverage_after": 0.22740547486468596,
+      "dfm_rejected": false
+    }
+  ],
+  "selection_stop_reason": "below_min_contribution",
+  "parts": [
+    {
+      "name": "part_0",
+      "width_mm": 500.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [],
+      "component_type": "panel",
+      "position": [
+        391.5527950310559,
+        0.0,
+        350.0
+      ]
+    },
+    {
+      "name": "part_1",
+      "width_mm": 500.0,
+      "height_mm": 680.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutout 0 is 1.75mm from edge (min 3.17mm)",
+          "value": 1.75,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutout 1 is 1.75mm from edge (min 3.17mm)",
+          "value": 1.75,
+          "limit": 3.175
+        },
+        {
+          "rule_name": "bridge_width",
+          "severity": "warning",
+          "message": "Cutout 2 is 1.75mm from edge (min 3.17mm)",
+          "value": 1.75,
+          "limit": 3.175
+        }
+      ],
+      "component_type": "panel",
+      "position": [
+        -350.0,
+        0.0,
+        340.0
+      ]
+    },
+    {
+      "name": "part_2",
+      "width_mm": 500.0,
+      "height_mm": 700.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [],
+      "component_type": "panel",
+      "position": [
+        -391.5527950310559,
+        0.0,
+        349.99999999999994
+      ]
+    },
+    {
+      "name": "part_3",
+      "width_mm": 40.0,
+      "height_mm": 680.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [],
+      "component_type": "leg",
+      "position": [
+        350.0,
+        -220.0,
+        340.0
+      ]
+    },
+    {
+      "name": "part_4",
+      "width_mm": 40.0,
+      "height_mm": 680.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [],
+      "component_type": "leg",
+      "position": [
+        370.0,
+        200.0,
+        340.0
+      ]
+    },
+    {
+      "name": "part_5",
+      "width_mm": 40.0,
+      "height_mm": 680.0,
+      "thickness_mm": 9.524999999999999,
+      "material": "plywood_baltic_birch",
+      "dfm_violations": [],
+      "component_type": "leg",
+      "position": [
+        -370.0,
+        -200.0,
+        340.0
+      ]
+    }
+  ],
+  "scores": {
+    "hausdorff_mm": 508.7920736291879,
+    "mean_distance_mm": 305.49412859906505,
+    "part_count": 6,
+    "dfm_violations_error": 0,
+    "dfm_violations_warning": 3,
+    "structural_plausibility": 0.625,
+    "overall_score": 0.52,
+    "coverage_fraction": 0.22740547486468596,
+    "fit_ratios": [
+      0.9788819875776398,
+      0.84,
+      0.014285714285714285
+    ]
+  },
+  "simulation": {
+    "stable": true,
+    "position_change": 4.634778960404948e-05,
+    "rotation_change": 7.566911186140154e-05,
+    "height_drop": 0.014771586085058306,
+    "fell_over": false,
+    "touched_ground": false,
+    "simulation_time": 3.0,
+    "wall_time": 0.13515496253967285,
+    "load_test_passed": true,
+    "load_final_height": 0.0
+  },
+  "quality_gates": [
+    {
+      "name": "coverage",
+      "status": "fail",
+      "metric_value": 0.22740547486468596,
+      "threshold_pass": 0.7,
+      "threshold_fail": 0.5,
+      "message": "Surface coverage 22.7%",
+      "recommendations": [
+        "Lower min_coverage_contribution from 0.002 to 0.001",
+        "Increase max_slabs from 15 to 20"
+      ]
+    },
+    {
+      "name": "part_count",
+      "status": "pass",
+      "metric_value": 6.0,
+      "threshold_pass": 15.0,
+      "threshold_fail": 20.0,
+      "message": "6 parts selected",
+      "recommendations": []
+    },
+    {
+      "name": "hausdorff",
+      "status": "fail",
+      "metric_value": 508.7920736291879,
+      "threshold_pass": 30.0,
+      "threshold_fail": 60.0,
+      "message": "Hausdorff distance 508.8 mm",
+      "recommendations": [
+        "High hausdorff distance: missing surface coverage",
+        "Add candidate sources or lower area threshold"
+      ]
+    },
+    {
+      "name": "dfm_errors",
+      "status": "pass",
+      "metric_value": 0.0,
+      "threshold_pass": 0.0,
+      "threshold_fail": 3.0,
+      "message": "0 DFM errors",
+      "recommendations": []
+    },
+    {
+      "name": "structural",
+      "status": "warn",
+      "metric_value": 0.625,
+      "threshold_pass": 0.75,
+      "threshold_fail": 0.5,
+      "message": "Structural plausibility 0.62",
+      "recommendations": []
+    },
+    {
+      "name": "stability",
+      "status": "pass",
+      "metric_value": 1.0,
+      "threshold_pass": 1.0,
+      "threshold_fail": 0.5,
+      "message": "Stable",
+      "recommendations": []
+    },
+    {
+      "name": "fit_ratios",
+      "status": "fail",
+      "metric_value": 0.9857142857142858,
+      "threshold_pass": 0.5,
+      "threshold_fail": 1.0,
+      "message": "Fit ratio deviation 0.99 (ratios: ['0.98', '0.84', '0.01'])",
+      "recommendations": [
+        "Parts don't span mesh correctly: check scaling and pose alignment"
+      ]
+    }
+  ],
+  "overall_status": "fail",
+  "summary": "Decomposition produced 6 parts with 23% surface coverage and 508.8 mm Hausdorff distance. 3 quality gate(s) failed. Top recommendation: Lower min_coverage_contribution from 0.002 to 0.001",
+  "top_issues": [
+    "[FAIL] coverage: Surface coverage 22.7%",
+    "[FAIL] hausdorff: Hausdorff distance 508.8 mm",
+    "[WARN] structural: Structural plausibility 0.62",
+    "[FAIL] fit_ratios: Fit ratio deviation 0.99 (ratios: ['0.98', '0.84', '0.01'])"
+  ],
+  "recommended_actions": [
+    "Lower min_coverage_contribution from 0.002 to 0.001",
+    "Increase max_slabs from 15 to 20",
+    "High hausdorff distance: missing surface coverage",
+    "Add candidate sources or lower area threshold",
+    "Parts don't span mesh correctly: check scaling and pose alignment"
+  ],
+  "comparison": null
+}

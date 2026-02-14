@@ -204,40 +204,54 @@ def create_table_genome(
     
     This is NOT a fixed template - it generates random valid starting points
     for evolution.
+    
+    Component dimensions use the convention:
+    - width: X dimension
+    - height: Y dimension  
+    - thickness: Z dimension (vertical height for legs)
+    
+    NO rotations are used - all components have rx=ry=rz=0.
     """
     genome = FurnitureGenome(base_thickness=thickness)
     
+    # Small gap to prevent collision issues
+    gap = 1.0  # 1mm
+    
     # Random dimensions
-    height = np.random.uniform(*height_range)
+    total_height = np.random.uniform(*height_range)
     width = np.random.uniform(*width_range)
     depth = np.random.uniform(*depth_range)
     
-    # Tabletop
+    # Leg dimensions
+    num_legs = np.random.choice(num_legs_options)
+    leg_width = np.random.uniform(40, 80)  # X and Y cross-section
+    leg_height = total_height - thickness - gap  # Z dimension (vertical)
+    
+    # Tabletop - sits on top of legs
+    # Position: z = leg_height + gap (on top of legs)
     top_idx = genome.add_component(ComponentGene(
         component_type=ComponentType.PANEL,
-        width=width,
-        height=depth,
-        thickness=thickness,
-        x=0, y=0, z=height - thickness,
+        width=width,           # X
+        height=depth,          # Y
+        thickness=thickness,   # Z
+        x=0, 
+        y=0, 
+        z=leg_height + gap,    # Sits on legs
         rx=0, ry=0, rz=0,
     ))
-    
-    # Random number of legs
-    num_legs = np.random.choice(num_legs_options)
-    leg_thickness = np.random.uniform(40, 80)
-    leg_height = height - thickness
     
     # Position legs based on count
     if num_legs == 3:
         # Triangle configuration
+        inset = 0.1
         leg_positions = [
-            (width * 0.5, depth * 0.15),  # Front center
-            (width * 0.15, depth * 0.85),  # Back left
-            (width * 0.85, depth * 0.85),  # Back right
+            (width * 0.5, depth * inset),           # Front center
+            (width * inset, depth * (1-inset)),     # Back left
+            (width * (1-inset), depth * (1-inset)), # Back right
         ]
     elif num_legs == 4:
         # Corner configuration with random inset
-        inset = np.random.uniform(0.05, 0.15)
+        inset = np.random.uniform(0.08, 0.15)
         leg_positions = [
             (width * inset, depth * inset),
             (width * (1-inset), depth * inset),
@@ -245,7 +259,7 @@ def create_table_genome(
             (width * inset, depth * (1-inset)),
         ]
     else:  # 6 legs
-        inset = np.random.uniform(0.05, 0.15)
+        inset = np.random.uniform(0.08, 0.15)
         leg_positions = [
             (width * inset, depth * inset),
             (width * 0.5, depth * inset),
@@ -255,17 +269,17 @@ def create_table_genome(
             (width * inset, depth * (1-inset)),
         ]
     
-    # Create legs
+    # Create legs - vertical boxes starting at z=0
     for i, (lx, ly) in enumerate(leg_positions):
         leg_idx = genome.add_component(ComponentGene(
             component_type=ComponentType.LEG,
-            width=leg_thickness,
-            height=leg_height,
-            thickness=leg_thickness,
-            x=lx - leg_thickness/2,
-            y=ly - leg_thickness/2,
-            z=0,
-            rx=np.pi/2, ry=0, rz=0,  # Standing vertical
+            width=leg_width,      # X dimension
+            height=leg_width,     # Y dimension (square cross-section)
+            thickness=leg_height, # Z dimension (vertical height)
+            x=lx - leg_width/2,   # Center leg at position
+            y=ly - leg_width/2,
+            z=0,                  # Start at ground
+            rx=0, ry=0, rz=0,     # No rotation!
         ))
         
         # Connect leg to tabletop
@@ -273,22 +287,8 @@ def create_table_genome(
             component_a_idx=top_idx,
             component_b_idx=leg_idx,
             joint_type=JointType.TAB_SLOT,
-            anchor_a=(lx/width, ly/depth, 0.0),  # Bottom of top
-            anchor_b=(0.5, 1.0, 0.5),  # Top of leg
-        ))
-    
-    # Optionally add cross-bracing (random chance)
-    if np.random.random() < 0.3 and num_legs >= 4:
-        # Add a stretcher between front legs
-        brace_idx = genome.add_component(ComponentGene(
-            component_type=ComponentType.BRACE,
-            width=width * 0.6,
-            height=thickness * 2,
-            thickness=thickness,
-            x=width * 0.2,
-            y=depth * 0.1,
-            z=leg_height * 0.2,
-            rx=np.pi/2, ry=0, rz=0,
+            anchor_a=(lx/width, ly/depth, 0.0),
+            anchor_b=(0.5, 0.5, 1.0),  # Top center of leg
         ))
     
     return genome
@@ -298,7 +298,7 @@ def create_shelf_genome(
     height_range: Tuple[float, float] = (800, 2000),
     width_range: Tuple[float, float] = (600, 1200),
     depth_range: Tuple[float, float] = (200, 400),
-    num_shelves_range: Tuple[int, int] = (2, 8),
+    num_shelves_range: Tuple[int, int] = (2, 6),
     thickness: float = 18.0,
 ) -> FurnitureGenome:
     """
@@ -308,92 +308,144 @@ def create_shelf_genome(
     - 0, 1, or 2 side panels
     - Variable number of shelves
     - Optional back panel
-    - Optional front supports
+    - Optional top panel
+    
+    Note: All components use rx=ry=rz=0 to avoid rotation/collision issues.
+    The width/height/thickness define the 3D box directly.
+    For side panels: width=thickness, height=depth, thickness=height (the tall dimension)
+    
+    A small gap (1mm) is added between adjacent components to prevent physics
+    collision artifacts from interpenetrating geometry.
     """
     genome = FurnitureGenome(base_thickness=thickness)
     
-    # Random dimensions
-    height = np.random.uniform(*height_range)
-    width = np.random.uniform(*width_range)
-    depth = np.random.uniform(*depth_range)
+    # Small gap to prevent collision artifacts
+    gap = 1.0  # 1mm gap between components
     
-    # Decide on configuration
-    num_sides = np.random.choice([0, 1, 2], p=[0.1, 0.2, 0.7])  # Usually 2 sides
+    # Random dimensions (these are the ASSEMBLED shelf dimensions)
+    total_height = np.random.uniform(*height_range)
+    total_width = np.random.uniform(*width_range)
+    total_depth = np.random.uniform(*depth_range)
+    
+    # Decide on configuration - bias toward more stable configs
+    num_sides = np.random.choice([1, 2], p=[0.2, 0.8])  # At least 1 side for stability
     num_shelves = np.random.randint(*num_shelves_range)
-    has_back = np.random.random() < 0.5
-    has_top = np.random.random() < 0.7
+    has_back = np.random.random() < 0.6  # Back helps stability
+    has_top = np.random.random() < 0.8
+    has_bottom = True  # Always have a bottom shelf for stability
     
     side_indices = []
     shelf_indices = []
     
-    # Create side panels
+    # Create side panels (vertical orientation)
+    # Side panel dimensions: thin in X, full depth in Y, full height in Z
+    # Side panels rest on the bottom shelf, so they start at z=gap+thickness (above bottom shelf)
+    side_z = 0  # Side panels go all the way to ground
+    side_height = total_height  # Full height
+    
     if num_sides >= 1:
+        # Left side panel
         left_idx = genome.add_component(ComponentGene(
             component_type=ComponentType.PANEL,
-            width=depth,
-            height=height,
-            thickness=thickness,
-            x=0, y=0, z=0,
-            rx=0, ry=np.pi/2, rz=0,  # Vertical, facing inward
+            width=thickness,
+            height=total_depth,
+            thickness=side_height,
+            x=0, 
+            y=0, 
+            z=side_z,
+            rx=0, ry=0, rz=0,
         ))
         side_indices.append(left_idx)
     
     if num_sides >= 2:
+        # Right side panel
         right_idx = genome.add_component(ComponentGene(
             component_type=ComponentType.PANEL,
-            width=depth,
-            height=height,
-            thickness=thickness,
-            x=width - thickness, y=0, z=0,
-            rx=0, ry=np.pi/2, rz=0,
+            width=thickness,
+            height=total_depth,
+            thickness=side_height,
+            x=total_width - thickness, 
+            y=0, 
+            z=side_z,
+            rx=0, ry=0, rz=0,
         ))
         side_indices.append(right_idx)
     
-    # Create shelves with variable spacing
-    shelf_positions = []
-    if num_shelves > 0:
-        # Generate random but sorted shelf positions
-        positions = sorted(np.random.uniform(0.05, 0.95, num_shelves))
-        
-        for i, rel_z in enumerate(positions):
-            z_pos = rel_z * (height - thickness)
-            shelf_width = width - (thickness * num_sides)  # Fit between sides
-            
-            shelf_idx = genome.add_component(ComponentGene(
-                component_type=ComponentType.SHELF,
-                width=shelf_width,
-                height=depth,
-                thickness=thickness,
-                x=thickness if num_sides >= 1 else 0,
-                y=0,
-                z=z_pos,
-                rx=0, ry=0, rz=0,
-            ))
-            shelf_indices.append(shelf_idx)
-            shelf_positions.append(z_pos)
-            
-            # Connect shelf to sides
-            for side_idx in side_indices:
-                genome.add_connection(ConnectionGene(
-                    component_a_idx=shelf_idx,
-                    component_b_idx=side_idx,
-                    joint_type=JointType.TAB_SLOT,
-                ))
+    # Inner width (between side panels, with gaps)
+    inner_width = total_width - (thickness * num_sides) - (gap * num_sides)
+    shelf_x_offset = (thickness + gap) if num_sides >= 1 else 0
     
-    # Optional back panel
+    # Bottom shelf (always present for stability)
+    if has_bottom:
+        bottom_idx = genome.add_component(ComponentGene(
+            component_type=ComponentType.SHELF,
+            width=inner_width,
+            height=total_depth - gap,  # Slight gap from back
+            thickness=thickness,
+            x=shelf_x_offset,
+            y=0,
+            z=gap,  # Tiny gap above ground to avoid z-fighting
+            rx=0, ry=0, rz=0,
+        ))
+        shelf_indices.append(bottom_idx)
+        for side_idx in side_indices:
+            genome.add_connection(ConnectionGene(
+                component_a_idx=bottom_idx,
+                component_b_idx=side_idx,
+                joint_type=JointType.TAB_SLOT,
+            ))
+    
+    # Interior shelves with spacing
+    if num_shelves > 0:
+        # Ensure minimum spacing between shelves (150mm)
+        min_spacing = 150
+        available_height = total_height - thickness * 2  # Leave room for top/bottom
+        max_shelves = int(available_height / min_spacing)
+        num_shelves = min(num_shelves, max_shelves)
+        
+        if num_shelves > 0:
+            # Evenly distribute shelves with some randomness
+            base_spacing = available_height / (num_shelves + 1)
+            
+            for i in range(num_shelves):
+                # Add some randomness to position but keep reasonable spacing
+                z_pos = thickness + base_spacing * (i + 1)
+                z_pos += np.random.uniform(-base_spacing * 0.2, base_spacing * 0.2)
+                z_pos = max(thickness + 50, min(z_pos, total_height - thickness - 50))
+                
+                shelf_idx = genome.add_component(ComponentGene(
+                    component_type=ComponentType.SHELF,
+                    width=inner_width,
+                    height=total_depth - gap,
+                    thickness=thickness,
+                    x=shelf_x_offset,
+                    y=0,
+                    z=z_pos,
+                    rx=0, ry=0, rz=0,
+                ))
+                shelf_indices.append(shelf_idx)
+                
+                for side_idx in side_indices:
+                    genome.add_connection(ConnectionGene(
+                        component_a_idx=shelf_idx,
+                        component_b_idx=side_idx,
+                        joint_type=JointType.TAB_SLOT,
+                    ))
+    
+    # Optional back panel (helps with stability significantly)
     if has_back:
+        back_thickness = thickness / 2  # Back panels often thinner
         back_idx = genome.add_component(ComponentGene(
             component_type=ComponentType.PANEL,
-            width=width - (thickness * num_sides),
-            height=height,
-            thickness=thickness / 2,  # Back panels often thinner
-            x=thickness if num_sides >= 1 else 0,
-            y=depth - thickness/2,
-            z=0,
-            rx=np.pi/2, ry=0, rz=0,
+            width=inner_width,
+            height=back_thickness,
+            thickness=total_height - gap,  # Slightly shorter to avoid overlap with top
+            x=shelf_x_offset,
+            y=total_depth - back_thickness,
+            z=gap,  # Start above ground
+            rx=0, ry=0, rz=0,
         ))
         
-        # Connect back to sides
         for side_idx in side_indices:
             genome.add_connection(ConnectionGene(
                 component_a_idx=back_idx,
@@ -405,10 +457,12 @@ def create_shelf_genome(
     if has_top:
         top_idx = genome.add_component(ComponentGene(
             component_type=ComponentType.PANEL,
-            width=width,
-            height=depth,
+            width=total_width,
+            height=total_depth,
             thickness=thickness,
-            x=0, y=0, z=height - thickness,
+            x=0, 
+            y=0, 
+            z=total_height - thickness + gap,  # Sit on top of side panels with gap
             rx=0, ry=0, rz=0,
         ))
         

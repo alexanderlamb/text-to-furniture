@@ -1,0 +1,24 @@
+{
+  "name": "decomposition",
+  "components": [
+    {
+      "name": "slab_0",
+      "type": "shelf",
+      "width": 609.5999999999999,
+      "height": 762.0,
+      "thickness": 3.175,
+      "position": [
+        0.21280271948951096,
+        -0.06622601259488495,
+        13.673515552174662
+      ],
+      "rotation": [
+        -0.00219457169207223,
+        -0.006716718035454229,
+        1.5707963267948966
+      ],
+      "material": "plywood_baltic_birch"
+    }
+  ],
+  "joints": []
+}
