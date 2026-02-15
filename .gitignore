@@ -1,38 +1,16 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
+.pytest_cache/
+venv/
 
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-package-lock.json
-yarn.lock
+# Environment
+.env
+.env.local
+.ui_settings.json
 
-# IDEs
+# IDE/editor
 .vscode/
 .idea/
 *.swp
@@ -40,30 +18,11 @@ yarn.lock
 *~
 .DS_Store
 
-# Environment
-.env
-.env.local
-.ui_settings.json
-
-# Output files
-*.stl
-*.obj
-*.step
-*.dxf
-outputs/
-renders/
-
-# Model cache
-.cache/
-*.pkl
-*.pt
-*.pth
-
-# Large data directories
-models/
-training_data/
-training_data_v2/
-
-# Logs
+# Runtime artifacts
+runs/
+output/
+uploads/*.glb
+uploads/*.stl
+uploads/*.obj
+uploads/*.ply
 *.log
-logs/

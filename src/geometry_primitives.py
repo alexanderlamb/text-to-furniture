@@ -5,6 +5,7 @@ Built on Shapely for 2D polygon operations. Provides PlanarPatch (from mesh
 face extraction), PartProfile2D (CNC-ready 2D part with cutouts), and
 conversions between Shapely and Component.profile formats.
 """
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
@@ -18,6 +19,7 @@ from shapely import affinity
 
 class FeatureType(Enum):
     """Types of manufacturing features on a 2D part."""
+
     SLOT = "slot"
     TAB = "tab"
     FINGER_SLOT = "finger_slot"
@@ -29,6 +31,7 @@ class FeatureType(Enum):
 @dataclass
 class PartFeature:
     """A manufacturing feature on a 2D part profile."""
+
     feature_type: FeatureType
     geometry: shapely.Geometry  # Polygon for areas, LineString for engravings
     parameters: Dict[str, float] = field(default_factory=dict)
@@ -40,12 +43,13 @@ class PlanarPatch:
 
     Extracted by RANSAC + region growing from a 3D mesh.
     """
-    plane_normal: np.ndarray        # (3,) unit normal
-    plane_offset: float             # signed distance from origin (n . p = d)
-    face_indices: List[int]         # indices into mesh.faces
-    boundary_2d: Polygon            # 2D outline projected onto the patch's plane
+
+    plane_normal: np.ndarray  # (3,) unit normal
+    plane_offset: float  # signed distance from origin (n . p = d)
+    face_indices: List[int]  # indices into mesh.faces
+    boundary_2d: Polygon  # 2D outline projected onto the patch's plane
     area_mm2: float
-    centroid_3d: np.ndarray         # (3,) world-space centroid
+    centroid_3d: np.ndarray  # (3,) world-space centroid
     # 2D basis vectors used for projection (set by plane_extraction)
     basis_u: Optional[np.ndarray] = None  # (3,) first basis vector
     basis_v: Optional[np.ndarray] = None  # (3,) second basis vector
@@ -58,8 +62,9 @@ class PartProfile2D:
     This is the canonical representation for DFM checking, joint synthesis,
     and DXF/SVG export.
     """
-    outline: Polygon                      # outer boundary
-    cutouts: List[Polygon] = field(default_factory=list)   # slots, holes
+
+    outline: Polygon  # outer boundary
+    cutouts: List[Polygon] = field(default_factory=list)  # slots, holes
     features: List[PartFeature] = field(default_factory=list)
     material_key: str = "plywood_baltic_birch"
     thickness_mm: float = 6.35
@@ -111,6 +116,7 @@ class PartProfile2D:
 
 # ─── Conversion functions ────────────────────────────────────────────────────
 
+
 def project_faces_to_2d(
     mesh,
     face_indices: List[int],
@@ -126,7 +132,10 @@ def project_faces_to_2d(
         plane_offset: signed distance from origin
     """
     polygon, _, _, _ = project_faces_to_2d_with_basis(
-        mesh, face_indices, plane_normal, plane_offset,
+        mesh,
+        face_indices,
+        plane_normal,
+        plane_offset,
     )
     return polygon
 
@@ -239,6 +248,7 @@ def compute_obb_2d(polygon: Polygon) -> Tuple[float, float, float]:
 
 
 # ─── Internal helpers ────────────────────────────────────────────────────────
+
 
 def _make_2d_basis(normal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Build an orthonormal (u, v) basis perpendicular to normal."""

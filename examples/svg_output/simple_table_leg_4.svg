@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8" ?>
-<svg baseProfile="full" height="772.0mm" version="1.1" viewBox="0 0 100.0 772.0" width="100.0mm" xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events" xmlns:xlink="http://www.w3.org/1999/xlink"><defs><style type="text/css"><![CDATA[
-        .cut { stroke: #ff0000; stroke-width: 0.5; fill: none; }
-        .engrave { stroke: #0000ff; stroke-width: 0.25; fill: none; }
-        .label { font-size: 12px; font-family: Arial, sans-serif; fill: #333; }
-        .dim { font-size: 10px; font-family: Arial, sans-serif; fill: #666; }
-    ]]></style></defs><polygon class="cut" points="20.0,20.0 80.0,20.0 80.0,752.0 20.0,752.0" /><text class="label" text-anchor="middle" x="50.0" y="376.0">leg_4</text><text class="dim" text-anchor="middle" x="50.0" y="391.0">(leg)</text><text class="dim" text-anchor="middle" x="50.0" y="404.0">t=60.0mm</text><line class="engrave" x1="20.0" x2="80.0" y1="757.0" y2="757.0" /><text class="dim" text-anchor="middle" x="50.0" y="762.0">60mm</text><line class="engrave" x1="85.0" x2="85.0" y1="20.0" y2="752.0" /><text class="dim" text-anchor="middle" transform="rotate(-90, 90.0, 386.0)" x="90.0" y="386.0">732mm</text></svg>

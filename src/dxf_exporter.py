@@ -7,6 +7,7 @@ Uses ezdxf to produce DXF files with proper layers:
 
 Units: millimeters. Format: R2010.
 """
+
 import logging
 import os
 from dataclasses import dataclass
@@ -24,10 +25,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DXFExportConfig:
     """Configuration for DXF export."""
+
     cut_layer: str = "CUT"
     engrave_layer: str = "ENGRAVE"
-    cut_color: int = 1       # ACI red
-    engrave_color: int = 5   # ACI blue
+    cut_color: int = 1  # ACI red
+    engrave_color: int = 5  # ACI blue
     units: str = "mm"
     add_part_labels: bool = True
     label_height_mm: float = 5.0
@@ -127,10 +129,14 @@ def design_to_nested_dxf(
     _setup_layers(doc, config)
 
     # Draw sheet outline
-    sheet = Polygon([
-        (0, 0), (sheet_width_mm, 0),
-        (sheet_width_mm, sheet_height_mm), (0, sheet_height_mm),
-    ])
+    sheet = Polygon(
+        [
+            (0, 0),
+            (sheet_width_mm, 0),
+            (sheet_width_mm, sheet_height_mm),
+            (0, sheet_height_mm),
+        ]
+    )
     _add_polygon_to_dxf(msp, sheet, config.engrave_layer)
 
     # Simple row-based nesting
@@ -157,6 +163,7 @@ def design_to_nested_dxf(
         offset_y = current_y - bounds[1]
 
         from shapely import affinity
+
         translated = affinity.translate(profile.outline, offset_x, offset_y)
         _add_polygon_to_dxf(msp, translated, config.cut_layer)
 
@@ -186,6 +193,7 @@ def design_to_nested_dxf(
 
 # ─── Internal helpers ────────────────────────────────────────────────────────
 
+
 def _setup_layers(doc, config: DXFExportConfig) -> None:
     """Create CUT and ENGRAVE layers."""
     doc.layers.add(config.cut_layer, color=config.cut_color)
@@ -208,7 +216,7 @@ def _add_part_geometry(
     # Engrave features
     for feature in profile.features:
         if feature.feature_type == FeatureType.ENGRAVE:
-            if hasattr(feature.geometry, 'coords'):
+            if hasattr(feature.geometry, "coords"):
                 # LineString
                 coords = list(feature.geometry.coords)
                 if len(coords) >= 2:

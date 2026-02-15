@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8" ?>
-<svg baseProfile="full" height="1011.9817140785203mm" version="1.1" viewBox="0 0 304.5446616416239 1011.9817140785203" width="304.5446616416239mm" xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events" xmlns:xlink="http://www.w3.org/1999/xlink"><defs><style type="text/css"><![CDATA[
-        .cut { stroke: #ff0000; stroke-width: 0.5; fill: none; }
-        .engrave { stroke: #0000ff; stroke-width: 0.25; fill: none; }
-        .label { font-size: 12px; font-family: Arial, sans-serif; fill: #333; }
-        .dim { font-size: 10px; font-family: Arial, sans-serif; fill: #666; }
-    ]]></style></defs><polygon class="cut" points="20.0,20.0 284.5446616416239,20.0 284.5446616416239,991.9817140785203 20.0,991.9817140785203" /><text class="label" text-anchor="middle" x="152.27233082081196" y="495.99085703926016">comp_0</text><text class="dim" text-anchor="middle" x="152.27233082081196" y="510.99085703926016">(panel)</text><text class="dim" text-anchor="middle" x="152.27233082081196" y="523.9908570392602">t=18.0mm</text><line class="engrave" x1="20.0" x2="284.5446616416239" y1="996.9817140785203" y2="996.9817140785203" /><text class="dim" text-anchor="middle" x="152.27233082081196" y="1001.9817140785203">265mm</text><line class="engrave" x1="289.5446616416239" x2="289.5446616416239" y1="20.0" y2="991.9817140785203" /><text class="dim" text-anchor="middle" transform="rotate(-90, 294.5446616416239, 505.99085703926016)" x="294.5446616416239" y="505.99085703926016">972mm</text></svg>

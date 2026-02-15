@@ -1,292 +1,236 @@
 #!/usr/bin/env python3
-"""
-Generate flat-pack furniture from text prompts, images, or existing meshes.
+"""Mesh-only CLI for the first-principles strategy."""
 
-Usage:
-    # From text (requires API key)
-    python scripts/generate_furniture.py --text "a modern coffee table" --provider tripo
-    python scripts/generate_furniture.py --text "wooden bookshelf" --provider meshy
+from __future__ import annotations
 
-    # From image (requires API key)
-    python scripts/generate_furniture.py --image photo.jpg --provider tripo
-
-    # From existing mesh file (no API key needed)
-    python scripts/generate_furniture.py --mesh model.glb
-
-API keys are read from TRIPO_API_KEY or MESHY_API_KEY environment variables,
-or passed via --api-key.
-"""
-import sys
-import os
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from mesh_provider import ProviderConfig, ProviderError
-from mesh_decomposer import DecompositionConfig
-from mesh_cleanup import MeshCleanupConfig
-from manufacturing_decomposer_v2 import ManufacturingDecompositionConfigV2
-from slab_candidates import Slab3DConfig
-from slab_selector import SlabSelectionConfig
-from pipeline import run_pipeline, run_pipeline_from_mesh, PipelineConfig
 from materials import MATERIALS
+from pipeline import PipelineConfig, run_pipeline_from_mesh
+from step3_first_principles import Step3Input, build_default_capability_profile
 
 
-def get_provider(name, api_key=None):
-    """Create a provider instance by name."""
-    if name == "tripo":
-        key = api_key or os.environ.get("TRIPO_API_KEY")
-        if not key:
-            print("Error: Set TRIPO_API_KEY environment variable or pass --api-key")
-            sys.exit(1)
-        from tripo_provider import TripoProvider
-        return TripoProvider(ProviderConfig(api_key=key))
-    elif name == "meshy":
-        key = api_key or os.environ.get("MESHY_API_KEY")
-        if not key:
-            print("Error: Set MESHY_API_KEY environment variable or pass --api-key")
-            sys.exit(1)
-        from meshy_provider import MeshyProvider
-        return MeshyProvider(ProviderConfig(api_key=key))
-    else:
-        print(f"Error: Unknown provider '{name}'. Use 'tripo' or 'meshy'.")
-        sys.exit(1)
-
-
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate flat-pack furniture from text, images, or meshes"
+        description="Run first-principles decomposition from a local mesh"
+    )
+    parser.add_argument(
+        "--mesh", required=True, help="Path to .stl/.obj/.glb/.ply mesh"
+    )
+    parser.add_argument("--name", default="design", help="Design name for this run")
+    parser.add_argument("--runs-dir", default="runs", help="Run output root directory")
+
+    parser.add_argument(
+        "--material",
+        type=str,
+        default="plywood_baltic_birch",
+        choices=sorted(MATERIALS.keys()),
+        help="Material key",
+    )
+    parser.add_argument(
+        "--step3-fidelity-weight",
+        type=float,
+        default=0.75,
+        help="Fidelity weight (0-1)",
+    )
+    parser.add_argument(
+        "--step3-part-budget",
+        type=int,
+        default=10,
+        help="Maximum selected parts",
     )
 
-    # Input mode (mutually exclusive)
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument("--text", type=str, help="Text prompt describing furniture")
-    input_group.add_argument("--image", type=str, help="Path to input image")
-    input_group.add_argument(
-        "--mesh", type=str, help="Path to existing mesh file (skip generation)"
-    )
-
-    # Provider options
-    parser.add_argument(
-        "--provider", type=str, default="tripo", choices=["tripo", "meshy"],
-        help="Cloud provider for mesh generation (default: tripo)",
-    )
-    parser.add_argument("--api-key", type=str, default=None, help="API key override")
-
-    # Decomposition options
-    parser.add_argument(
-        "--material", type=str, default="plywood_baltic_birch",
-        choices=list(MATERIALS.keys()),
-        help="Material for flat-pack components (default: plywood_baltic_birch)",
-    )
-    parser.add_argument(
-        "--height", type=float, default=750.0, help="Target height in mm (default: 750)"
-    )
-    parser.add_argument(
-        "--max-slabs", type=int, default=15, help="Max flat-pack components (default: 15)"
-    )
-    parser.add_argument(
-        "--coverage", type=float, default=0.80,
-        help="Voxel coverage target 0-1 (default: 0.80)",
-    )
-    parser.add_argument(
-        "--selection-objective", type=str, default="volume_fill",
-        choices=["surface_coverage", "volume_fill"],
-        help="Selection objective for manufacturing v2 (default: volume_fill)",
-    )
-    parser.add_argument(
-        "--target-volume-fill", type=float, default=0.55,
-        help="Interior volume fill target 0-1 for volume_fill mode (default: 0.55)",
-    )
-    parser.add_argument(
-        "--min-volume-contribution", type=float, default=0.002,
-        help="Minimum per-slab volume contribution in volume_fill mode (default: 0.002)",
-    )
-    parser.add_argument(
-        "--plane-penalty-weight", type=float, default=0.0005,
-        help="Per-slab penalty in volume_fill objective (default: 0.0005)",
-    )
-    cleanup_group = parser.add_mutually_exclusive_group()
-    cleanup_group.add_argument(
-        "--mesh-cleanup",
-        dest="mesh_cleanup",
+    bend = parser.add_mutually_exclusive_group()
+    bend.add_argument(
+        "--step3-bending",
         action="store_true",
-        help="Enable mesh cleanup (flatten near-planar faces, align near-parallel faces)",
+        dest="step3_bending",
+        help="Enable controlled bending (default)",
     )
-    cleanup_group.add_argument(
-        "--no-mesh-cleanup",
-        dest="mesh_cleanup",
+    bend.add_argument(
+        "--step3-no-bending",
         action="store_false",
-        help="Disable mesh cleanup",
+        dest="step3_bending",
+        help="Disable controlled bending",
     )
-    parser.set_defaults(mesh_cleanup=None)
-    parser.add_argument(
-        "--cleanup-planar-angle-deg", type=float, default=8.0,
-        help="Max face-angle deviation for planar grouping (default: 8.0)",
-    )
-    parser.add_argument(
-        "--cleanup-planar-distance-mm", type=float, default=1.5,
-        help="Max distance from plane for planar grouping (default: 1.5 mm)",
-    )
-    parser.add_argument(
-        "--cleanup-parallel-angle-deg", type=float, default=5.0,
-        help="Max normal-angle gap to enforce parallelism (default: 5.0)",
-    )
-    parser.add_argument(
-        "--cleanup-simplify-mm", type=float, default=2.0,
-        help="Planar-region quantization tolerance for simplification (default: 2.0 mm)",
-    )
-    parser.add_argument(
-        "--cleanup-min-region-area-mm2", type=float, default=400.0,
-        help="Minimum planar-region area to process (default: 400 mm^2)",
-    )
-    parser.add_argument(
-        "--cleanup-iterations", type=int, default=2,
-        help="Maximum cleanup iterations (default: 2)",
-    )
+    parser.set_defaults(step3_bending=True)
 
-    # Pipeline options
-    parser.add_argument("--no-simulate", action="store_true", help="Skip physics simulation")
+    parser.add_argument("--target-height-mm", type=float, default=750.0)
+    parser.add_argument("--no-auto-scale", action="store_true")
+    parser.add_argument(
+        "--step3-no-planar-stacking",
+        action="store_true",
+        help="Disable stacking multiple identical planar sheets for thickness fill",
+    )
+    parser.add_argument(
+        "--step3-max-stack-layers",
+        type=int,
+        default=4,
+        help="Maximum laminate layers allowed per planar region",
+    )
+    parser.add_argument(
+        "--step3-stack-roundup-bias",
+        type=float,
+        default=0.35,
+        help=(
+            "Bias for rounding sheet layer count toward additional layers "
+            "(0.0 aggressive, 1.0 conservative)"
+        ),
+    )
+    parser.add_argument(
+        "--step3-stack-extra-layer-gain",
+        type=float,
+        default=0.65,
+        help="Relative selection gain for extra laminate layers (0-1.5)",
+    )
+    parser.add_argument(
+        "--step3-no-thin-side-suppression",
+        action="store_true",
+        help="Disable suppression of thin side planes when stacked sheets cover thickness",
+    )
+    parser.add_argument(
+        "--step3-thin-side-dim-multiplier",
+        type=float,
+        default=1.10,
+        help="Max thin-side short dimension relative to inferred member thickness",
+    )
+    parser.add_argument(
+        "--step3-thin-side-aspect-limit",
+        type=float,
+        default=0.25,
+        help="Max short/long aspect ratio for classifying a planar candidate as thin-side",
+    )
+    parser.add_argument(
+        "--step3-thin-side-coverage-start",
+        type=float,
+        default=0.40,
+        help="Coverage ratio at which thin-side candidates begin to be penalized",
+    )
+    parser.add_argument(
+        "--step3-thin-side-coverage-drop",
+        type=float,
+        default=0.62,
+        help="Coverage ratio at which thin-side candidates are dropped",
+    )
+    parser.add_argument(
+        "--step3-no-intersection-filter",
+        action="store_true",
+        help="Disable filtering of overlapping non-stack parts",
+    )
+    parser.add_argument(
+        "--step3-no-joint-intent-crossings",
+        action="store_true",
+        help="Disallow orthogonal intersection exceptions for joinery intent",
+    )
+    parser.add_argument(
+        "--step3-intersection-clearance-mm",
+        type=float,
+        default=0.5,
+        help="Clearance used when checking part-part intersections",
+    )
+    parser.add_argument(
+        "--step3-joint-contact-tolerance-mm",
+        type=float,
+        default=2.0,
+        help="Maximum gap for forming joints from geometric contact",
+    )
+    parser.add_argument(
+        "--step3-joint-parallel-dot-threshold",
+        type=float,
+        default=0.95,
+        help="Skip explicit joints when |dot(normals)| exceeds this threshold",
+    )
     parser.add_argument("--no-svg", action="store_true", help="Skip SVG export")
-    parser.add_argument("--no-optimize", action="store_true", help="Skip decomposition optimization")
-    parser.add_argument("--output", type=str, default="output", help="Output directory")
-    parser.add_argument("--name", type=str, default="furniture", help="Design name")
-    parser.add_argument(
-        "--manufacturing-v2", action="store_true",
-        help="Use v2 3D-first manufacturing decomposition",
-    )
-    parser.add_argument(
-        "--export-dxf", action="store_true",
-        help="Export DXF cut files (manufacturing-aware mode)",
-    )
+    parser.add_argument("--no-dxf", action="store_true", help="Skip DXF export")
     parser.add_argument("-v", "--verbose", action="store_true")
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    cleanup_enabled = args.mesh_cleanup
-    if cleanup_enabled is None:
-        cleanup_enabled = args.manufacturing_v2
-
-    cleanup_config = MeshCleanupConfig(
-        enabled=cleanup_enabled,
-        planar_angle_threshold_deg=args.cleanup_planar_angle_deg,
-        planar_distance_threshold_mm=args.cleanup_planar_distance_mm,
-        parallel_angle_threshold_deg=args.cleanup_parallel_angle_deg,
-        boundary_simplify_tolerance_mm=args.cleanup_simplify_mm,
-        min_region_area_mm2=args.cleanup_min_region_area_mm2,
-        max_iterations=args.cleanup_iterations,
+    capability = build_default_capability_profile(
+        material_key=args.material,
+        allow_controlled_bending=args.step3_bending,
     )
 
-    mfg_cleanup_config = MeshCleanupConfig(
-        enabled=cleanup_enabled,
-        planar_angle_threshold_deg=args.cleanup_planar_angle_deg,
-        planar_distance_threshold_mm=args.cleanup_planar_distance_mm,
-        parallel_angle_threshold_deg=args.cleanup_parallel_angle_deg,
-        boundary_simplify_tolerance_mm=args.cleanup_simplify_mm,
-        min_region_area_mm2=args.cleanup_min_region_area_mm2,
-        max_iterations=args.cleanup_iterations,
+    step3_input = Step3Input(
+        mesh_path=args.mesh,
+        design_name=args.name,
+        fidelity_weight=max(0.0, min(1.0, args.step3_fidelity_weight)),
+        part_budget_max=max(1, args.step3_part_budget),
+        material_preferences=[args.material],
+        scs_capabilities=capability,
+        target_height_mm=args.target_height_mm,
+        auto_scale=not args.no_auto_scale,
+        enable_planar_stacking=not args.step3_no_planar_stacking,
+        max_stack_layers_per_region=max(1, args.step3_max_stack_layers),
+        stack_roundup_bias=max(0.0, min(0.95, args.step3_stack_roundup_bias)),
+        stack_extra_layer_gain=max(0.0, min(1.5, args.step3_stack_extra_layer_gain)),
+        enable_thin_side_suppression=not args.step3_no_thin_side_suppression,
+        thin_side_dim_multiplier=max(1.0, args.step3_thin_side_dim_multiplier),
+        thin_side_aspect_limit=max(0.05, min(0.95, args.step3_thin_side_aspect_limit)),
+        thin_side_coverage_penalty_start=max(0.0, args.step3_thin_side_coverage_start),
+        thin_side_coverage_drop_threshold=max(
+            args.step3_thin_side_coverage_start + 1e-3,
+            args.step3_thin_side_coverage_drop,
+        ),
+        enable_intersection_filter=not args.step3_no_intersection_filter,
+        allow_joint_intent_intersections=not args.step3_no_joint_intent_crossings,
+        intersection_clearance_mm=max(0.0, args.step3_intersection_clearance_mm),
+        joint_contact_tolerance_mm=max(0.0, args.step3_joint_contact_tolerance_mm),
+        joint_parallel_dot_threshold=max(
+            0.0, min(0.999999, args.step3_joint_parallel_dot_threshold)
+        ),
     )
 
     pipeline_config = PipelineConfig(
-        decomposition=DecompositionConfig(
-            default_material=args.material,
-            target_height_mm=args.height,
-            max_slabs=args.max_slabs,
-            coverage_target=args.coverage,
-            selection_objective_mode=args.selection_objective,
-            target_volume_fill=args.target_volume_fill,
-            min_volume_contribution=args.min_volume_contribution,
-            plane_penalty_weight=args.plane_penalty_weight,
-            mesh_cleanup=cleanup_config,
-        ),
-        run_simulation=not args.no_simulate,
+        runs_dir=args.runs_dir,
         export_svg=not args.no_svg,
-        optimize_decomposition=not args.no_optimize,
-        output_dir=args.output,
-        use_manufacturing_v2=args.manufacturing_v2,
-        manufacturing_v2_config=ManufacturingDecompositionConfigV2(
-            slab_candidates=Slab3DConfig(
-                material_key=args.material,
-                target_height_mm=args.height,
-            ),
-            slab_selection=SlabSelectionConfig(
-                coverage_target=args.coverage,
-                max_slabs=args.max_slabs,
-                objective_mode=args.selection_objective,
-                target_volume_fill=args.target_volume_fill,
-                min_volume_contribution=args.min_volume_contribution,
-                plane_penalty_weight=args.plane_penalty_weight,
-            ),
-            default_material=args.material,
-            target_height_mm=args.height,
-            mesh_cleanup=mfg_cleanup_config,
-        ),
-        export_dxf=args.export_dxf or args.manufacturing_v2,
+        export_dxf=not args.no_dxf,
+        step3_input=step3_input,
     )
 
-    try:
-        if args.mesh:
-            result = run_pipeline_from_mesh(args.mesh, args.name, pipeline_config)
-        else:
-            provider = get_provider(args.provider, args.api_key)
-            result = run_pipeline(
-                provider=provider,
-                prompt=args.text or "",
-                image_path=args.image or "",
-                design_name=args.name,
-                config=pipeline_config,
-            )
-    except ProviderError as e:
-        print(f"Error: {e}")
-        return 1
+    result = run_pipeline_from_mesh(
+        args.mesh, design_name=args.name, config=pipeline_config
+    )
+    output = result.step3_output
+    assert output is not None
 
-    # Print results
-    print(f"\nDesign: {result.design.name}")
-    print(f"Mesh: {result.mesh_path}")
-    print(f"Components: {len(result.design.components)}")
-    print(f"Joints: {len(result.design.assembly.joints)}")
+    errors = sum(1 for v in output.violations if v.severity == "error")
+    warnings = sum(1 for v in output.violations if v.severity == "warning")
 
-    for comp in result.design.components:
-        w = float(comp.profile[2][0]) if len(comp.profile) >= 3 else 0
-        h = float(comp.profile[2][1]) if len(comp.profile) >= 3 else 0
-        print(
-            f"  {comp.name}: {w:.0f} x {h:.0f} x {comp.thickness:.1f} mm "
-            f"({comp.type.value}, {comp.material})"
-        )
-
-    if result.simulation:
-        status = "STABLE" if result.simulation.stable else "UNSTABLE"
-        print(f"\nPhysics: {status}")
-        print(f"  Position change: {result.simulation.position_change:.4f} m")
-        print(f"  Rotation change: {result.simulation.rotation_change:.4f} rad")
-
-    if result.manufacturing_result:
-        mfg = result.manufacturing_result
-        print(f"\nManufacturing score: {mfg.score.overall_score:.2f}")
-        print(f"  Hausdorff: {mfg.score.hausdorff_mm:.1f} mm")
-        print(f"  DFM errors: {mfg.score.dfm_violations_error}")
-        print(f"  DFM warnings: {mfg.score.dfm_violations_warning}")
-        print(f"  Structural plausibility: {mfg.score.structural_plausibility:.2f}")
-        print(f"  Assembly steps: {len(mfg.assembly_steps)}")
+    print(f"Run ID: {result.run_id}")
+    print(f"Run dir: {result.run_dir}")
+    print(f"Status: {output.status.upper()}")
+    print(f"Parts: {output.quality_metrics.part_count}")
+    print(f"Joints: {len(output.joints)}")
+    print(f"Score: {output.quality_metrics.overall_score:.3f}")
+    print(f"Hausdorff: {output.quality_metrics.hausdorff_mm:.2f} mm")
+    print(f"Normal error: {output.quality_metrics.normal_error_deg:.2f} deg")
+    print(f"Violations: {errors} errors, {warnings} warnings")
+    print(f"Design JSON: {result.design_json_path}")
+    print(f"Metrics: {result.metrics_path}")
+    print(f"Summary: {result.summary_path}")
 
     if result.svg_paths:
-        print(f"\nSVG files: {len(result.svg_paths)} exported to {args.output}/")
-
+        print(f"SVG files: {len(result.svg_paths)}")
     if result.dxf_paths:
-        print(f"DXF files: {len(result.dxf_paths)} exported to {args.output}/")
-
-    if result.design_json_path:
-        print(f"Design JSON: {result.design_json_path}")
+        print(f"DXF files: {len(result.dxf_paths)}")
 
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

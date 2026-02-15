@@ -5,6 +5,7 @@ Checks part profiles against manufacturing constraints (minimum slot widths,
 internal radii, bridge widths, aspect ratios, sheet sizes). Also provides
 dogbone relief insertion for internal right-angle corners.
 """
+
 import logging
 import math
 from dataclasses import dataclass, field
@@ -23,13 +24,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DFMConfig:
     """CNC routing manufacturing constraints."""
-    min_slot_width_inch: float = 0.125       # 1/8" end mill
+
+    min_slot_width_inch: float = 0.125  # 1/8" end mill
     min_internal_radius_inch: float = 0.063  # 1/16" inside corner radius
-    slip_fit_clearance_inch: float = 0.010   # per-side clearance for press fit
-    min_bridge_width_inch: float = 0.125     # minimum remaining material
-    max_aspect_ratio: float = 20.0           # length/width before warping risk
-    max_sheet_width_mm: float = 609.6        # 24" (plywood default)
-    max_sheet_height_mm: float = 762.0       # 30" (plywood default)
+    slip_fit_clearance_inch: float = 0.010  # per-side clearance for press fit
+    min_bridge_width_inch: float = 0.125  # minimum remaining material
+    max_aspect_ratio: float = 20.0  # length/width before warping risk
+    max_sheet_width_mm: float = 609.6  # 24" (plywood default)
+    max_sheet_height_mm: float = 762.0  # 30" (plywood default)
 
     @property
     def min_slot_width_mm(self) -> float:
@@ -60,6 +62,7 @@ class DFMConfig:
 @dataclass
 class DFMViolation:
     """A single DFM rule violation."""
+
     rule_name: str
     severity: str  # "error" or "warning"
     message: str
@@ -97,6 +100,7 @@ def check_part_dfm(
 
 # ─── Individual checks ───────────────────────────────────────────────────────
 
+
 def _check_sheet_size(
     profile: PartProfile2D,
     config: DFMConfig,
@@ -108,21 +112,25 @@ def _check_sheet_size(
     height = bounds[3] - bounds[1]
 
     if width > config.max_sheet_width_mm:
-        violations.append(DFMViolation(
-            rule_name="sheet_size_width",
-            severity="error",
-            message=f"Part width {width:.1f}mm exceeds sheet width {config.max_sheet_width_mm:.1f}mm",
-            value=width,
-            limit=config.max_sheet_width_mm,
-        ))
+        violations.append(
+            DFMViolation(
+                rule_name="sheet_size_width",
+                severity="error",
+                message=f"Part width {width:.1f}mm exceeds sheet width {config.max_sheet_width_mm:.1f}mm",
+                value=width,
+                limit=config.max_sheet_width_mm,
+            )
+        )
     if height > config.max_sheet_height_mm:
-        violations.append(DFMViolation(
-            rule_name="sheet_size_height",
-            severity="error",
-            message=f"Part height {height:.1f}mm exceeds sheet height {config.max_sheet_height_mm:.1f}mm",
-            value=height,
-            limit=config.max_sheet_height_mm,
-        ))
+        violations.append(
+            DFMViolation(
+                rule_name="sheet_size_height",
+                severity="error",
+                message=f"Part height {height:.1f}mm exceeds sheet height {config.max_sheet_height_mm:.1f}mm",
+                value=height,
+                limit=config.max_sheet_height_mm,
+            )
+        )
     return violations
 
 
@@ -140,13 +148,15 @@ def _check_aspect_ratio(
 
     ratio = max(width, height) / min(width, height)
     if ratio > config.max_aspect_ratio:
-        return [DFMViolation(
-            rule_name="aspect_ratio",
-            severity="warning",
-            message=f"Aspect ratio {ratio:.1f} exceeds {config.max_aspect_ratio:.1f} (warping risk)",
-            value=ratio,
-            limit=config.max_aspect_ratio,
-        )]
+        return [
+            DFMViolation(
+                rule_name="aspect_ratio",
+                severity="warning",
+                message=f"Aspect ratio {ratio:.1f} exceeds {config.max_aspect_ratio:.1f} (warping risk)",
+                value=ratio,
+                limit=config.max_aspect_ratio,
+            )
+        ]
     return []
 
 
@@ -166,14 +176,16 @@ def _check_slot_widths(
         slot_w = min(b[2] - b[0], b[3] - b[1])
         if slot_w < min_w:
             centroid = cutout.centroid
-            violations.append(DFMViolation(
-                rule_name="slot_width",
-                severity="error",
-                message=f"Cutout {i} width {slot_w:.2f}mm < minimum {min_w:.2f}mm",
-                location=centroid,
-                value=slot_w,
-                limit=min_w,
-            ))
+            violations.append(
+                DFMViolation(
+                    rule_name="slot_width",
+                    severity="error",
+                    message=f"Cutout {i} width {slot_w:.2f}mm < minimum {min_w:.2f}mm",
+                    location=centroid,
+                    value=slot_w,
+                    limit=min_w,
+                )
+            )
     return violations
 
 
@@ -187,13 +199,15 @@ def _check_bridge_widths(
 
     net = profile.net_polygon()
     if net.is_empty:
-        violations.append(DFMViolation(
-            rule_name="bridge_width",
-            severity="error",
-            message="Net polygon is empty (cutouts consume entire part)",
-            value=0.0,
-            limit=min_bridge,
-        ))
+        violations.append(
+            DFMViolation(
+                rule_name="bridge_width",
+                severity="error",
+                message="Net polygon is empty (cutouts consume entire part)",
+                value=0.0,
+                limit=min_bridge,
+            )
+        )
         return violations
 
     # Check distance between each cutout and the outline boundary
@@ -205,14 +219,16 @@ def _check_bridge_widths(
             continue
         dist = outline.exterior.distance(cutout)
         if dist < min_bridge:
-            violations.append(DFMViolation(
-                rule_name="bridge_width",
-                severity="error" if dist < min_bridge * 0.5 else "warning",
-                message=f"Cutout {i} is {dist:.2f}mm from edge (min {min_bridge:.2f}mm)",
-                location=cutout.centroid,
-                value=dist,
-                limit=min_bridge,
-            ))
+            violations.append(
+                DFMViolation(
+                    rule_name="bridge_width",
+                    severity="error" if dist < min_bridge * 0.5 else "warning",
+                    message=f"Cutout {i} is {dist:.2f}mm from edge (min {min_bridge:.2f}mm)",
+                    location=cutout.centroid,
+                    value=dist,
+                    limit=min_bridge,
+                )
+            )
 
     # Check distance between pairs of cutouts
     for i in range(len(profile.cutouts)):
@@ -221,13 +237,15 @@ def _check_bridge_widths(
                 continue
             dist = profile.cutouts[i].distance(profile.cutouts[j])
             if dist < min_bridge:
-                violations.append(DFMViolation(
-                    rule_name="bridge_width",
-                    severity="warning",
-                    message=f"Cutouts {i} and {j} are {dist:.2f}mm apart (min {min_bridge:.2f}mm)",
-                    value=dist,
-                    limit=min_bridge,
-                ))
+                violations.append(
+                    DFMViolation(
+                        rule_name="bridge_width",
+                        severity="warning",
+                        message=f"Cutouts {i} and {j} are {dist:.2f}mm apart (min {min_bridge:.2f}mm)",
+                        value=dist,
+                        limit=min_bridge,
+                    )
+                )
 
     return violations
 
@@ -246,14 +264,16 @@ def _check_internal_radii(
             continue
         sharp_corners = _find_sharp_internal_corners(cutout, min_r)
         for pt, angle in sharp_corners:
-            violations.append(DFMViolation(
-                rule_name="internal_radius",
-                severity="warning",
-                message=f"Cutout {i} has sharp internal corner ({math.degrees(angle):.0f} deg) - needs dogbone",
-                location=pt,
-                value=0.0,
-                limit=min_r,
-            ))
+            violations.append(
+                DFMViolation(
+                    rule_name="internal_radius",
+                    severity="warning",
+                    message=f"Cutout {i} has sharp internal corner ({math.degrees(angle):.0f} deg) - needs dogbone",
+                    location=pt,
+                    value=0.0,
+                    limit=min_r,
+                )
+            )
 
     return violations
 
@@ -292,6 +312,7 @@ def _find_sharp_internal_corners(
 
 
 # ─── Dogbone Relief ─────────────────────────────────────────────────────────
+
 
 def add_dogbone_relief(
     polygon: Polygon,
@@ -347,7 +368,8 @@ def add_dogbone_relief(
             # Place circle center at corner + bisector * radius
             center = p1 + bisector * radius_mm
             circle = Point(float(center[0]), float(center[1])).buffer(
-                radius_mm, quad_segs=4,
+                radius_mm,
+                quad_segs=4,
             )
             circles.append(circle)
 

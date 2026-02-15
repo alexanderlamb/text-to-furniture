@@ -1,266 +1,216 @@
-"""
-End-to-end pipeline: Text/Image -> Cloud API -> 3D Mesh -> Flat-Pack Design -> SVG.
+"""Single-path pipeline: mesh -> first-principles step3 -> run artifacts."""
 
-Two entry points:
-  - run_pipeline(): Generate mesh from text/image via cloud provider, then decompose
-  - run_pipeline_from_mesh(): Start from an existing mesh file (skip cloud generation)
+from __future__ import annotations
 
-Both produce a FurnitureDesign with optional physics simulation and SVG export.
-"""
-import os
 import json
 import logging
-from typing import Optional, List
-from dataclasses import dataclass, field
+import os
+import time
+from dataclasses import asdict, dataclass, field, replace
+from typing import Dict, List, Optional
 
-from mesh_provider import MeshProvider, GenerationResult
-from mesh_decomposer import decompose, DecompositionConfig
-from furniture import FurnitureDesign
-from simulator import FurnitureSimulator, SimulationResult
-from svg_exporter import design_to_svg, design_to_nested_svg
-from manufacturing_decomposer_v2 import (
-    ManufacturingDecompositionConfigV2,
-    ManufacturingDecompositionResult,
-    decompose_manufacturing_v2,
-)
 from dxf_exporter import design_to_dxf, design_to_nested_dxf
+from materials import MATERIALS
+from run_protocol import (
+    copy_input_mesh,
+    prepare_run_dir,
+    update_latest_pointer,
+    write_json,
+    write_text,
+)
+from step3_first_principles import Step3Input, Step3Output, decompose_first_principles
+from svg_exporter import design_to_nested_svg, design_to_svg
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PipelineConfig:
-    """Configuration for the full pipeline."""
-    decomposition: DecompositionConfig = field(default_factory=DecompositionConfig)
-    run_simulation: bool = True
-    sim_duration: float = 3.0
+    runs_dir: str = "runs"
     export_svg: bool = True
     export_nested_svg: bool = True
-    optimize_decomposition: bool = True
-    output_dir: str = "output"
-    use_manufacturing_v2: bool = False
-    manufacturing_v2_config: Optional[ManufacturingDecompositionConfigV2] = None
-    export_dxf: bool = False
+    export_dxf: bool = True
+    export_nested_dxf: bool = True
+    step3_input: Optional[Step3Input] = None
 
 
 @dataclass
 class PipelineResult:
-    """Result from the full pipeline."""
-    design: FurnitureDesign
-    mesh_path: str
-    generation: Optional[GenerationResult] = None
-    simulation: Optional[SimulationResult] = None
+    run_id: str
+    run_dir: str
+    design_json_path: str
+    metrics_path: str
+    summary_path: str
+    manifest_path: str
+    mesh_input_path: str
     svg_paths: List[str] = field(default_factory=list)
     nested_svg_path: Optional[str] = None
-    design_json_path: Optional[str] = None
     dxf_paths: List[str] = field(default_factory=list)
-    manufacturing_result: Optional[ManufacturingDecompositionResult] = None
-
-    @property
-    def is_stable(self) -> bool:
-        if self.simulation is None:
-            return True  # Not tested
-        return self.simulation.stable
-
-
-def _run_post_mesh(
-    mesh_path: str,
-    design_name: str,
-    config: PipelineConfig,
-    generation: Optional[GenerationResult] = None,
-) -> PipelineResult:
-    """Shared logic after a mesh file is available."""
-    output_dir = os.path.join(config.output_dir, design_name)
-    os.makedirs(output_dir, exist_ok=True)
-
-    manufacturing_result = None
-    dxf_paths = []
-
-    if config.use_manufacturing_v2:
-        # V2 3D-first manufacturing pipeline
-        v2_config = config.manufacturing_v2_config or ManufacturingDecompositionConfigV2(
-            default_material=config.decomposition.default_material,
-            target_height_mm=config.decomposition.target_height_mm,
-            auto_scale=config.decomposition.auto_scale,
-        )
-
-        logger.info("Running v2 manufacturing decomposition: %s", mesh_path)
-        manufacturing_result = decompose_manufacturing_v2(mesh_path, v2_config)
-        design = manufacturing_result.design
-        design.name = design_name
-
-        logger.info(
-            "V2 manufacturing decomposition: %d components, %d joints, score=%.2f",
-            len(design.components),
-            len(design.assembly.joints),
-            manufacturing_result.score.overall_score,
-        )
-
-        # Save manufacturing JSON
-        design_json_path = os.path.join(output_dir, "design_manufacturing.json")
-        with open(design_json_path, "w") as f:
-            json.dump(manufacturing_result.to_manufacturing_json(), f, indent=2)
-
-        # Export DXF
-        if config.export_dxf and manufacturing_result.parts:
-            dxf_dir = os.path.join(output_dir, "dxf")
-            dxf_parts = list(manufacturing_result.parts.items())
-            dxf_paths = design_to_dxf(dxf_parts, dxf_dir)
-            nested_dxf = os.path.join(dxf_dir, f"{design_name}_nested.dxf")
-            design_to_nested_dxf(dxf_parts, nested_dxf)
-            dxf_paths.append(nested_dxf)
-            logger.info("Exported %d DXF files", len(dxf_paths))
-
-    else:
-        # Original voxel-based pipeline
-        logger.info("Decomposing mesh: %s", mesh_path)
-        design = decompose(
-            filepath=mesh_path,
-            config=config.decomposition,
-            optimize=config.optimize_decomposition,
-        )
-        design.name = design_name
-        logger.info(
-            "Decomposed into %d components, %d joints",
-            len(design.components), len(design.assembly.joints),
-        )
-
-        design_json_path = os.path.join(output_dir, "design.json")
-
-    # Save design JSON (for both paths)
-    if not config.use_manufacturing_v2:
-        design_json_path = os.path.join(output_dir, "design.json")
-        design_data = {
-            "name": design.name,
-            "components": [
-                {
-                    "name": c.name,
-                    "type": c.type.value,
-                    "width": float(c.profile[2][0]) if len(c.profile) >= 3 else 0,
-                    "height": float(c.profile[2][1]) if len(c.profile) >= 3 else 0,
-                    "thickness": float(c.thickness),
-                    "position": [float(x) for x in c.position],
-                    "rotation": [float(x) for x in c.rotation],
-                    "material": c.material,
-                }
-                for c in design.components
-            ],
-            "joints": [
-                {
-                    "component_a": j.component_a,
-                    "component_b": j.component_b,
-                    "joint_type": j.joint_type.value,
-                }
-                for j in design.assembly.joints
-            ],
-        }
-        with open(design_json_path, "w") as f:
-            json.dump(design_data, f, indent=2)
-
-    # Step 2: Optional physics simulation
-    sim_result = None
-    if config.run_simulation:
-        logger.info("Running physics simulation...")
-        sim = FurnitureSimulator(gui=False)
-        try:
-            sim_result = sim.simulate(design, duration=config.sim_duration)
-            logger.info(
-                "Simulation: %s (pos_change=%.4f, rot_change=%.4f)",
-                "STABLE" if sim_result.stable else "UNSTABLE",
-                sim_result.position_change,
-                sim_result.rotation_change,
-            )
-        finally:
-            sim.close()
-
-    # Step 3: Export SVGs
-    svg_paths = []
-    nested_svg = None
-    if config.export_svg:
-        svg_dir = os.path.join(output_dir, "svg")
-        svg_paths = design_to_svg(design, svg_dir)
-        logger.info("Exported %d SVG cut files", len(svg_paths))
-        if config.export_nested_svg:
-            nested_svg = os.path.join(svg_dir, f"{design_name}_nested.svg")
-            design_to_nested_svg(design, nested_svg)
-
-    return PipelineResult(
-        design=design,
-        mesh_path=mesh_path,
-        generation=generation,
-        simulation=sim_result,
-        svg_paths=svg_paths,
-        nested_svg_path=nested_svg,
-        design_json_path=design_json_path,
-        dxf_paths=dxf_paths,
-        manufacturing_result=manufacturing_result,
-    )
-
-
-def run_pipeline(
-    provider: MeshProvider,
-    prompt: str = "",
-    image_path: str = "",
-    design_name: str = "furniture",
-    config: Optional[PipelineConfig] = None,
-) -> PipelineResult:
-    """Run the full text/image-to-furniture pipeline.
-
-    Exactly one of prompt or image_path must be provided.
-
-    Args:
-        provider: Cloud mesh generation provider (Tripo, Meshy, etc.)
-        prompt: Text description of the desired furniture.
-        image_path: Path to an input image.
-        design_name: Name for this design (used in output paths).
-        config: Pipeline configuration.
-
-    Returns:
-        PipelineResult with design, simulation results, and SVG paths.
-    """
-    if config is None:
-        config = PipelineConfig()
-
-    output_dir = os.path.join(config.output_dir, design_name)
-    os.makedirs(output_dir, exist_ok=True)
-    mesh_path = os.path.join(output_dir, f"{design_name}.glb")
-
-    # Generate mesh via cloud provider
-    if prompt:
-        logger.info("Generating mesh from text: %s", prompt)
-        gen_result = provider.text_to_mesh(prompt, mesh_path)
-    elif image_path:
-        logger.info("Generating mesh from image: %s", image_path)
-        gen_result = provider.image_to_mesh(image_path, mesh_path)
-    else:
-        raise ValueError("Either prompt or image_path must be provided")
-
-    return _run_post_mesh(
-        gen_result.mesh_path, design_name, config, generation=gen_result
-    )
+    nested_dxf_path: Optional[str] = None
+    step3_output: Optional[Step3Output] = None
 
 
 def run_pipeline_from_mesh(
     mesh_path: str,
-    design_name: str = "furniture",
+    design_name: str = "design",
     config: Optional[PipelineConfig] = None,
 ) -> PipelineResult:
-    """Run the pipeline from an existing mesh file (skip cloud generation).
-
-    Useful for local meshes or debugging the decomposition step.
-
-    Args:
-        mesh_path: Path to a 3D mesh file (STL, OBJ, GLB, PLY).
-        design_name: Name for this design.
-        config: Pipeline configuration.
-
-    Returns:
-        PipelineResult with design, simulation results, and SVG paths.
-    """
-    if config is None:
-        config = PipelineConfig()
-
     if not os.path.isfile(mesh_path):
         raise FileNotFoundError(f"Mesh file not found: {mesh_path}")
 
-    return _run_post_mesh(mesh_path, design_name, config)
+    if config is None:
+        config = PipelineConfig()
+
+    started = time.perf_counter()
+    paths = prepare_run_dir(config.runs_dir, design_name)
+    copied_mesh = copy_input_mesh(mesh_path, paths.input_dir)
+
+    if config.step3_input is None:
+        step3_input = Step3Input(mesh_path=str(copied_mesh), design_name=design_name)
+    else:
+        step3_input = replace(
+            config.step3_input,
+            mesh_path=str(copied_mesh),
+            design_name=design_name,
+        )
+
+    logger.info("Running first-principles strategy for %s", copied_mesh)
+    step3 = decompose_first_principles(step3_input)
+    design = step3.design
+    design.name = design_name
+
+    design_json_path = paths.artifacts_dir / "design_first_principles.json"
+    write_json(design_json_path, step3.to_manufacturing_json())
+
+    svg_paths: List[str] = []
+    nested_svg_path = None
+    if config.export_svg:
+        svg_dir = paths.artifacts_dir / "svg"
+        svg_paths = design_to_svg(design, str(svg_dir))
+        if config.export_nested_svg:
+            nested_svg_path = str(svg_dir / f"{design_name}_nested.svg")
+            design_to_nested_svg(design, nested_svg_path)
+
+    dxf_paths: List[str] = []
+    nested_dxf_path = None
+    if config.export_dxf and step3.parts:
+        dxf_dir = paths.artifacts_dir / "dxf"
+        dxf_parts = [(name, part.profile) for name, part in step3.parts.items()]
+        dxf_paths = design_to_dxf(dxf_parts, str(dxf_dir))
+
+        if config.export_nested_dxf:
+            material_key = next(iter(step3.parts.values())).material_key
+            sheet_w, sheet_h = MATERIALS[material_key].max_size_mm
+            nested_dxf_path = str(dxf_dir / f"{design_name}_nested.dxf")
+            design_to_nested_dxf(
+                dxf_parts,
+                nested_dxf_path,
+                sheet_width_mm=sheet_w,
+                sheet_height_mm=sheet_h,
+            )
+
+    elapsed = time.perf_counter() - started
+
+    metrics_payload: Dict[str, object] = {
+        "run_id": paths.run_id,
+        "status": step3.status,
+        "elapsed_s": round(elapsed, 3),
+        "quality_metrics": asdict(step3.quality_metrics),
+        "violations": [asdict(v) for v in step3.violations],
+        "debug": dict(step3.debug),
+        "counts": {
+            "components": len(design.components),
+            "joints": len(design.assembly.joints),
+            "svg_files": len(svg_paths),
+            "dxf_files": len(dxf_paths),
+        },
+    }
+    write_json(paths.metrics_path, metrics_payload)
+
+    summary = _build_summary(step3, paths.run_id, elapsed, svg_paths, dxf_paths)
+    write_text(paths.summary_path, summary)
+
+    # Optional overlay screenshot (best-effort, requires matplotlib).
+    try:
+        from overlay_viewer import render_overlay_screenshot
+
+        screenshot_path = str(paths.artifacts_dir / "overlay_screenshot.png")
+        render_overlay_screenshot(str(paths.run_dir), screenshot_path)
+    except Exception as exc:
+        logger.debug("Overlay screenshot skipped: %s", exc)
+
+    manifest = {
+        "run_id": paths.run_id,
+        "strategy": "first_principles_step3",
+        "design_name": design_name,
+        "input_mesh": str(copied_mesh),
+        "status": step3.status,
+        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "config": {
+            "pipeline": asdict(config),
+            "step3_input": asdict(step3_input),
+        },
+        "artifacts": {
+            "design_json": str(design_json_path),
+            "metrics": str(paths.metrics_path),
+            "summary": str(paths.summary_path),
+            "svg": svg_paths,
+            "nested_svg": nested_svg_path,
+            "dxf": dxf_paths,
+            "nested_dxf": nested_dxf_path,
+        },
+    }
+    write_json(paths.manifest_path, manifest)
+    update_latest_pointer(config.runs_dir, paths.run_dir)
+
+    return PipelineResult(
+        run_id=paths.run_id,
+        run_dir=str(paths.run_dir),
+        design_json_path=str(design_json_path),
+        metrics_path=str(paths.metrics_path),
+        summary_path=str(paths.summary_path),
+        manifest_path=str(paths.manifest_path),
+        mesh_input_path=str(copied_mesh),
+        svg_paths=svg_paths,
+        nested_svg_path=nested_svg_path,
+        dxf_paths=dxf_paths,
+        nested_dxf_path=nested_dxf_path,
+        step3_output=step3,
+    )
+
+
+def _build_summary(
+    output: Step3Output,
+    run_id: str,
+    elapsed_s: float,
+    svg_paths: List[str],
+    dxf_paths: List[str],
+) -> str:
+    err = sum(1 for v in output.violations if v.severity == "error")
+    warn = sum(1 for v in output.violations if v.severity == "warning")
+
+    lines = [
+        f"# Run {run_id}",
+        "",
+        f"- Status: **{output.status.upper()}**",
+        f"- Duration: {elapsed_s:.2f}s",
+        f"- Parts: {output.quality_metrics.part_count}",
+        f"- Joints: {len(output.joints)}",
+        f"- Hausdorff: {output.quality_metrics.hausdorff_mm:.2f} mm",
+        f"- Normal error: {output.quality_metrics.normal_error_deg:.2f} deg",
+        f"- Overall score: {output.quality_metrics.overall_score:.3f}",
+        f"- Violations: {err} errors, {warn} warnings",
+        f"- SVG files: {len(svg_paths)}",
+        f"- DXF files: {len(dxf_paths)}",
+        "",
+        "## Key Violations",
+    ]
+
+    if not output.violations:
+        lines.append("- None")
+    else:
+        for v in output.violations[:12]:
+            part = f" ({v.part_id})" if v.part_id else ""
+            lines.append(f"- [{v.severity}] {v.code}{part}: {v.message}")
+
+    return "\n".join(lines) + "\n"
