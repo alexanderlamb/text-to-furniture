@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with this repository.
 
 ## Project Overview
 
-Text-to-furniture generates flat-pack furniture designs from text descriptions or images. Cloud APIs (Tripo3D, Meshy) generate 3D meshes, which are decomposed into flat rectangular components suitable for CNC cutting. The pipeline outputs SVG cut files ready for SendCutSend manufacturing.
+Text-to-furniture decomposes 3D meshes into flat-pack furniture designs for CNC cutting. The pipeline takes a mesh file, extracts planar and bendable regions, selects optimal parts within a budget, synthesizes joints, validates DFM rules, and outputs SVG/DXF cut files ready for SendCutSend manufacturing.
 
 ## Environment & Commands
 
@@ -13,26 +13,24 @@ Text-to-furniture generates flat-pack furniture designs from text descriptions o
 venv/bin/python3          # Always use this, not system python
 venv/bin/pip install -r requirements.txt
 
-# Generate furniture from text (requires TRIPO_API_KEY or MESHY_API_KEY env var)
-venv/bin/python3 scripts/generate_furniture.py --text "a modern coffee table" --provider tripo
+# Run pipeline on a single mesh
+venv/bin/python3 scripts/generate_furniture.py --mesh benchmarks/meshes/01_box.stl
 
-# Generate furniture from image
-venv/bin/python3 scripts/generate_furniture.py --image photo.jpg --provider meshy
+# Run benchmark suite (10 cases)
+venv/bin/python3 scripts/run_mesh_suite.py
 
-# Generate from existing mesh file (no API key needed)
-venv/bin/python3 scripts/generate_furniture.py --mesh model.glb
-
-# Decompose a mesh directly (lower-level)
-venv/bin/python3 scripts/decompose_mesh.py --input model.stl
-
-# Format code
-venv/bin/python3 -m black src/
+# Analyze latest suite results
+venv/bin/python3 scripts/analyze_suite.py
+venv/bin/python3 scripts/analyze_suite.py --compare  # vs previous run
 
 # Run tests
 venv/bin/python3 -m pytest tests/
 
-# Use MPLBACKEND=Agg for headless matplotlib rendering
-MPLBACKEND=Agg venv/bin/python3 scripts/visualize_decomposition.py --input model.stl
+# Format code
+venv/bin/python3 -m black src/
+
+# Launch review UI
+venv/bin/streamlit run app/streamlit_app.py
 ```
 
 ## Architecture
@@ -40,29 +38,49 @@ MPLBACKEND=Agg venv/bin/python3 scripts/visualize_decomposition.py --input model
 ### Data Flow
 
 ```
-Text  → [Tripo3D / Meshy API] → 3D Mesh ┐
-Image → [Tripo3D / Meshy API] → 3D Mesh ┤→ mesh_decomposer → FurnitureDesign → SVG export
-Local mesh file ─────────────────────────┘                          ↓
-                                                              Physics sim
-                                                              (PyBullet)
+Mesh file (.stl/.obj/.glb/.ply)
+  → step3_first_principles.decompose_first_principles()
+    → extract planar/bend regions from mesh
+    → score and select best candidates (within part budget)
+    → synthesize joints between adjacent parts
+    → validate DFM rules
+  → FurnitureDesign
+    → SVG export (red=cut, blue=engrave)
+    → DXF export
+    → metrics.json (quality scores, violations)
 ```
 
-### Core Modules (src/)
+### Source Layout
 
-- **mesh_provider.py** — Abstract `MeshProvider` base class, `ProviderConfig`, `GenerationResult`, exception hierarchy (`ProviderError`, `ProviderTimeoutError`, `ProviderAPIError`, `ProviderRateLimitError`).
-- **tripo_provider.py** — Tripo3D provider using official `tripo3d` SDK. Async wrapped in sync interface. API key: `TRIPO_API_KEY` env var.
-- **meshy_provider.py** — Meshy provider using REST API via `requests`. Preview mode for text-to-3D. API key: `MESHY_API_KEY` env var.
-- **pipeline.py** — Orchestrator: `run_pipeline(provider, prompt/image)` and `run_pipeline_from_mesh(path)`. Returns `PipelineResult` with design, simulation, SVG paths.
-- **mesh_decomposer.py** — Converts 3D meshes to flat-pack: cluster face normals → generate candidate slabs → greedy voxel set-cover → infer joints. Entry: `decompose(filepath, config)`.
-- **materials.py** — SendCutSend material catalog (`MATERIALS` dict, `Material` dataclass, `MIN_OVERLAP_MM=25`). Real thicknesses, densities, max sheet sizes.
+**Core modules (`src/`):**
+- **step3_first_principles.py** — Core decomposition algorithm. `Step3Input` (all tunable params), `decompose_first_principles()`, `Step3Output`.
+- **pipeline.py** — Orchestrator: `run_pipeline_from_mesh()` → creates run directory, calls decomposition, exports artifacts, writes metrics. Returns `PipelineResult`.
+- **run_protocol.py** — Run directory management: `prepare_run_dir()`, manifest/metrics writing.
 - **furniture.py** — Foundation types: `Component`, `Joint`, `AssemblyGraph`, `FurnitureDesign`.
-- **simulator.py** — PyBullet physics: stability testing, load testing, tip-over detection. Returns `SimulationResult`.
-- **urdf_generator.py** — Converts `FurnitureDesign` → URDF for PyBullet.
-- **svg_exporter.py** — CNC-ready SVG output with nested layout packing. Red=cut, blue=engrave.
+- **materials.py** — SendCutSend material catalog (`MATERIALS` dict, `Material` dataclass).
+- **dfm_rules.py** — Design-for-manufacturing validation rules.
+- **geometry_primitives.py** — Geometric helpers for profiles, polygons, transforms.
+- **svg_exporter.py** — CNC-ready SVG with nested layout packing.
+- **dxf_exporter.py** — DXF export for CAM systems.
+- **overlay_viewer.py** — 3D overlay scene builder for UI visualization.
+
+**Scripts (`scripts/`):**
+- **generate_furniture.py** — CLI for single-mesh pipeline runs.
+- **run_mesh_suite.py** — Benchmark suite runner with incremental progress output.
+- **analyze_suite.py** — Suite result analysis for structured review.
+
+**UI (`app/`):**
+- **streamlit_app.py** — Streamlit review UI (Suite Review + Run Detail tabs, suite launch with live progress).
+- **data.py** — Pure data helpers for the UI (no Streamlit imports).
+
+**Benchmarks (`benchmarks/`):**
+- **mesh_suite.json** — Suite definition (10 cases).
+- **meshes/** — Tracked STL test meshes.
+- **generate_meshes.py** — Script to regenerate benchmark meshes.
 
 ### Import Convention
 
-All imports use **bare module names** (e.g., `import furniture`, not `import src.furniture`). Scripts in `scripts/` add `src/` to `sys.path` before importing.
+All imports use **bare module names** (e.g., `import furniture`, not `import src.furniture`). Scripts and app files add `src/` to `sys.path` before importing.
 
 ### Units & Conventions
 
@@ -70,8 +88,35 @@ All imports use **bare module names** (e.g., `import furniture`, not `import src
 - Positions as **numpy arrays**
 - Component profiles are 2D (x,y) polygons; thickness is a separate field
 - Rotations in **radians**
-- `FurnitureDesign.validate()` checks component name uniqueness and joint reference integrity
 
-### Deprecated Modules
+## Development Workflow
 
-Old genome-based pipeline modules are in `src/deprecated/` for reference (genome.py, evolution.py, fitness.py, model.py, etc.). These are no longer part of the active pipeline.
+```
+1. Edit algorithm       →  src/step3_first_principles.py
+2. Run benchmark suite  →  venv/bin/python3 scripts/run_mesh_suite.py
+3. Analyze results      →  venv/bin/python3 scripts/analyze_suite.py
+4. Fix issues based on analysis
+5. Repeat
+```
+
+Suite results live in `runs/suites/<suite_run_id>/`. The analyze tool outputs priority cases (worst first), failure mode breakdown, and violation codes — designed for direct consumption by a coding agent.
+
+## Run Output Structure
+
+```
+runs/<timestamp>_<design_name>/
+  input/<mesh>
+  artifacts/
+    design_first_principles.json
+    svg/
+    dxf/
+  manifest.json
+  metrics.json
+  summary.md
+
+runs/suites/<suite_run_id>/
+  manifest.json
+  results.json
+  results.csv
+  summary.md
+```

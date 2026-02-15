@@ -1,12 +1,6 @@
-# Text-to-Furniture (Streamlined)
+# Text-to-Furniture
 
-This repository is a focused iteration harness for **one strategy only**:
-
-- First-principles Step 3 decomposition
-- Mesh input only
-- DFM + geometry metrics by default
-- JSON + SVG + DXF output every run
-- Streamlit UI for rapid debug and feedback
+Decomposes 3D meshes into flat-pack furniture designs suitable for CNC cutting (SendCutSend). Outputs SVG and DXF cut files.
 
 ## Quick Start
 
@@ -15,34 +9,58 @@ python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 ```
 
-Run strategy from CLI:
+Run on a single mesh:
 
 ```bash
-venv/bin/python3 scripts/generate_furniture.py \
-  --mesh uploads/generated_mesh.glb \
-  --name my_run
+venv/bin/python3 scripts/generate_furniture.py --mesh benchmarks/meshes/01_box.stl
 ```
 
-Launch Streamlit app:
+Output goes to `runs/<timestamp>_<name>/` with design JSON, SVG cut files, DXF files, and metrics.
+
+## Development Workflow
+
+```
+1. Edit algorithm       →  src/step3_first_principles.py (core decomposition)
+2. Run benchmark suite  →  venv/bin/python3 scripts/run_mesh_suite.py
+3. Analyze results      →  venv/bin/python3 scripts/analyze_suite.py
+4. Review in UI         →  venv/bin/streamlit run app/streamlit_app.py
+5. Repeat
+```
+
+The analyze tool prints a structured summary (priority cases, failure modes, violation codes) that can be handed directly to a coding agent.
+
+Compare against the previous suite run:
 
 ```bash
-venv/bin/python3 scripts/run_app.py
+venv/bin/python3 scripts/analyze_suite.py --compare
 ```
 
-Use the **Suite Lab** tab for iterative development:
+## Benchmark Suite
 
-- run the standard suite with current parameter settings
-- compare candidate vs baseline suite runs
-- inspect case-level diagnostics and failure modes with direct run drill-down
+`benchmarks/mesh_suite.json` defines 10 single-volume meshes of increasing complexity:
 
-## Run Protocol
+| Case | Shape | Faces |
+|------|-------|-------|
+| 01_box | Simple rectangular box | 12 |
+| 02_tall_cabinet | High aspect ratio box | 12 |
+| 03_l_bracket | L-shaped bracket | 24 |
+| 04_t_beam | T cross section | 28 |
+| 05_u_channel | U-shaped channel | 28 |
+| 06_step_stool | Two-step staircase | 32 |
+| 07_h_beam | H cross section | 60 |
+| 08_shelf_unit | Open shelf (sides + shelves) | 84 |
+| 09_desk | Top + sides + back | 48 |
+| 10_table_with_stretchers | Table with legs + stretchers | 116 |
 
-Every run writes a timestamped folder under `runs/`:
+Regenerate meshes: `venv/bin/python3 benchmarks/generate_meshes.py`
 
-```text
+## Run Output
+
+Each pipeline run writes:
+
+```
 runs/<run_id>/
-  input/
-    <mesh>
+  input/<mesh>
   artifacts/
     design_first_principles.json
     svg/
@@ -50,41 +68,17 @@ runs/<run_id>/
   manifest.json
   metrics.json
   summary.md
-  logs.txt
 ```
 
-`runs/latest` points to the newest run.
+Suite runs aggregate under `runs/suites/<suite_run_id>/` with `results.json`, `results.csv`, and `summary.md`.
 
-## CLI Flags
+## Scripts
 
-```text
---mesh                 required mesh path
---name                 design/run name
---runs-dir             run root (default: runs)
---material             material key
---step3-fidelity-weight
---step3-part-budget
---step3-bending / --step3-no-bending
---step3-no-planar-stacking
---step3-max-stack-layers
---step3-stack-roundup-bias
---step3-stack-extra-layer-gain
---step3-no-thin-side-suppression
---step3-thin-side-dim-multiplier
---step3-thin-side-aspect-limit
---step3-thin-side-coverage-start
---step3-thin-side-coverage-drop
---step3-no-intersection-filter
---step3-no-joint-intent-crossings
---step3-intersection-clearance-mm
---step3-joint-contact-tolerance-mm
---step3-joint-parallel-dot-threshold
---target-height-mm
---no-auto-scale
---no-svg
---no-dxf
--v
-```
+| Script | Purpose |
+|--------|---------|
+| `scripts/generate_furniture.py` | Run pipeline on a single mesh |
+| `scripts/run_mesh_suite.py` | Run full benchmark suite |
+| `scripts/analyze_suite.py` | Analyze latest suite results |
 
 ## Testing
 
@@ -92,25 +86,10 @@ runs/<run_id>/
 venv/bin/python3 -m pytest tests/
 ```
 
-Focused test suite covers:
-
-- strategy core behavior
-- single-path pipeline run protocol
-- SVG/DXF export
-- mesh-only CLI
-- Streamlit smoke and feedback helpers
-
-## Mesh Progress Suite
-
-Run the standard mesh benchmark suite after each strategy change:
+## UI
 
 ```bash
-venv/bin/python3 scripts/run_mesh_suite.py
+venv/bin/streamlit run app/streamlit_app.py
 ```
 
-Outputs are written under `runs/suites/<suite_run_id>/` with:
-
-- `summary.md` for quick scan
-- `results.json` and `results.csv` for tracking deltas
-
-`runs/suites/latest` points to the newest suite run.
+Two tabs: **Suite Review** (launch suites, compare runs, drill into cases) and **Run Detail** (inspect individual runs).
