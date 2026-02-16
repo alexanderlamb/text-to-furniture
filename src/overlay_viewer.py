@@ -207,8 +207,8 @@ def normalized_to_original(
 def _rotation_matrix_xyz(rotation_xyz: Sequence[float]) -> np.ndarray:
     from scipy.spatial.transform import Rotation
 
-    rotvec = np.asarray(rotation_xyz, dtype=float)
-    return Rotation.from_rotvec(rotvec).as_matrix()
+    euler_angles = np.asarray(rotation_xyz, dtype=float)
+    return Rotation.from_euler("xyz", euler_angles).as_matrix()
 
 
 def _clean_polygon(polygon: Polygon) -> Optional[Polygon]:

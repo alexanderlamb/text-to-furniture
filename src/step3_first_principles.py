@@ -178,6 +178,8 @@ class Step3Output:
                     "outline_2d": list(part.profile.outline.exterior.coords),
                     "cutouts_2d": [
                         list(c.exterior.coords) for c in part.profile.cutouts
+                    ] + [
+                        list(h.coords) for h in part.profile.outline.interiors
                     ],
                     "bend_ops": [
                         {
@@ -253,6 +255,8 @@ def _serialize_parts_snapshot(
                 "outline_2d": list(part.profile.outline.exterior.coords),
                 "cutouts_2d": [
                     list(c.exterior.coords) for c in part.profile.cutouts
+                ] + [
+                    list(h.coords) for h in part.profile.outline.interiors
                 ],
                 "bend_ops": [
                     {
@@ -2204,10 +2208,27 @@ def _constrain_outlines(
             grown.append(part)
             continue
 
-        # Only grow, never shrink: union the original outline with the grown extent
-        new_outline = unary_union([profile.outline, grown_outline])
-        if not isinstance(new_outline, Polygon):
-            new_outline = _largest_polygon(new_outline)
+        # Grow outward but preserve holes: expand the exterior using the
+        # grown extent, then re-punch the original interior rings.
+        new_exterior = unary_union(
+            [Polygon(profile.outline.exterior), grown_outline]
+        )
+        if not isinstance(new_exterior, Polygon):
+            new_exterior = _largest_polygon(new_exterior)
+        if new_exterior is None or new_exterior.is_empty:
+            grown.append(part)
+            continue
+        # Re-apply original holes (only those that remain inside the new exterior)
+        kept_holes = []
+        for hole in profile.outline.interiors:
+            hole_poly = Polygon(hole)
+            if new_exterior.contains(hole_poly) or new_exterior.intersects(hole_poly):
+                kept_holes.append(hole)
+        if kept_holes:
+            new_outline = Polygon(new_exterior.exterior, kept_holes)
+            new_outline = _clean_polygon(new_outline)
+        else:
+            new_outline = new_exterior
         if new_outline is None or new_outline.is_empty:
             grown.append(part)
             continue
@@ -2245,72 +2266,9 @@ def _constrain_outlines(
 
     snapshots.append(_serialize_parts_snapshot("Trimmed (planes)", 2, trimmed))
 
-    # Phase C: clip against mesh volume (cross-section)
-    clipped: List[ManufacturingPart] = []
-    for part in trimmed:
-        if part.region_type != RegionType.PLANAR_CUT:
-            clipped.append(part)
-            continue
-
-        profile = part.profile
-        if profile.basis_u is None or profile.basis_v is None or profile.origin_3d is None:
-            clipped.append(part)
-            continue
-
-        cross_section = _compute_mesh_cross_section(mesh, profile, part.rotation_3d)
-        if cross_section is None or cross_section.is_empty:
-            clipped.append(part)
-            continue
-
-        try:
-            new_outline = profile.outline.intersection(cross_section)
-        except Exception:
-            clipped.append(part)
-            continue
-
-        new_outline = _largest_polygon(new_outline)
-        if new_outline is None or new_outline.is_empty:
-            clipped.append(part)
-            continue
-
-        # Guard: skip mesh clip if it would catastrophically shrink the outline.
-        # This catches cases where the cross-section at the part's plane does not
-        # represent the face's footprint (e.g. horizontal faces on step geometries).
-        original_area = profile.outline.area
-        area_ratio = new_outline.area / original_area if original_area > 0 else 1.0
-        if (
-            area_ratio < input_spec.mesh_clip_min_area_ratio
-            or new_outline.area < input_spec.min_planar_region_area_mm2
-        ):
-            clipped.append(part)
-            continue
-
-        new_outline = new_outline.simplify(0.5, preserve_topology=True)
-        new_profile = PartProfile2D(
-            outline=new_outline,
-            cutouts=profile.cutouts,
-            features=profile.features,
-            material_key=profile.material_key,
-            thickness_mm=profile.thickness_mm,
-            basis_u=profile.basis_u,
-            basis_v=profile.basis_v,
-            origin_3d=profile.origin_3d,
-        )
-        clipped.append(
-            ManufacturingPart(
-                part_id=part.part_id,
-                material_key=part.material_key,
-                thickness_mm=part.thickness_mm,
-                profile=new_profile,
-                region_type=part.region_type,
-                position_3d=part.position_3d.copy(),
-                rotation_3d=part.rotation_3d.copy(),
-                source_area_mm2=part.source_area_mm2,
-                source_faces=list(part.source_faces),
-                bend_ops=list(part.bend_ops),
-                metadata=dict(part.metadata),
-            )
-        )
+    # Phase C skipped: Phase A now grows outlines to the mesh cross-section
+    # directly, so a redundant mesh clip is no longer needed.
+    clipped = trimmed
 
     snapshots.append(_serialize_parts_snapshot("Clipped (mesh)", 3, clipped))
 
@@ -2462,8 +2420,7 @@ def _compute_coplanar_extent(
     if connected.is_empty or connected.area < 1.0:
         return profile.outline
 
-    b = connected.bounds
-    return box(b[0], b[1], b[2], b[3])
+    return connected
 
 
 def _keep_connected(geometry, reference: Polygon) -> Polygon:
@@ -2604,7 +2561,7 @@ def _trim_at_plane_intersections(
     exhaustively over the group mask to maximize total outline area.
     """
     # -- Collect intersecting pairs and classify --
-    minor_pairs: List[Tuple[int, int]] = []
+    minor_pairs: List[Tuple[int, int, float, float]] = []  # (i, j, loss_i, loss_j)
     significant_pairs: List[Tuple[int, int]] = []
 
     for i in range(len(parts)):
@@ -2631,19 +2588,26 @@ def _trim_at_plane_intersections(
             if loss_i > _SIGNIFICANT_TRIM_THRESHOLD or loss_j > _SIGNIFICANT_TRIM_THRESHOLD:
                 significant_pairs.append((i, j))
             else:
-                minor_pairs.append((i, j))
+                minor_pairs.append((i, j, loss_i, loss_j))
 
     if not minor_pairs and not significant_pairs:
         return parts
 
-    # -- Apply minor pairs with largest-area-wins (no search needed) --
-    minor_groups = [[(i, j)] for i, j in minor_pairs]
+    # -- Apply minor pairs: trim the part that loses less (it's more "at its end") --
+    # The part with lower trim loss has the intersection line closer to its edge,
+    # meaning it barely extends past the other part. Trim it so the continuing
+    # part keeps its full extent.  Tie-break on area (larger area wins).
+    minor_groups = [[(i, j)] for i, j, _, _ in minor_pairs]
     minor_mask = 0
-    for k, (i, j) in enumerate(minor_pairs):
-        area_i = parts[i].profile.outline.area
-        area_j = parts[j].profile.outline.area
-        if area_i < area_j:
+    for k, (i, j, loss_i, loss_j) in enumerate(minor_pairs):
+        if loss_i < loss_j:
+            # Part i loses less → i is more at its end → trim i
             minor_mask |= 1 << k
+        elif loss_i == loss_j:
+            # Tie: trim the smaller-area part
+            if parts[i].profile.outline.area < parts[j].profile.outline.area:
+                minor_mask |= 1 << k
+        # else: loss_j < loss_i → trim j → bit stays 0
     if minor_groups:
         parts = _apply_trim_combination(parts, minor_groups, minor_mask)
 

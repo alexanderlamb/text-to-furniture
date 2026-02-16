@@ -4,7 +4,9 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Project Overview
 
-Text-to-furniture decomposes 3D meshes into flat-pack furniture designs for CNC cutting. The pipeline takes a mesh file, extracts planar and bendable regions, selects optimal parts within a budget, synthesizes joints, validates DFM rules, and outputs SVG/DXF cut files ready for SendCutSend manufacturing.
+This project decomposes 3D meshes into a discrete set of flat parts manufacturable by SendCutSend's CNC cutting services. Parts are arbitrary 2D profiles — any shape that can be cut from sheet stock (not limited to rectangles). The pipeline extracts planar regions from a mesh, selects optimal parts within a budget, synthesizes joints, validates against CNC manufacturing constraints, and outputs SVG/DXF cut files.
+
+**Key principle:** SendCutSend CNC machines can cut any arbitrary 2D shape from sheet material. The only constraints are DFM rules (minimum feature sizes, internal radii, sheet dimensions) — not geometric simplicity.
 
 ## Environment & Commands
 
@@ -16,7 +18,7 @@ venv/bin/pip install -r requirements.txt
 # Run pipeline on a single mesh
 venv/bin/python3 scripts/generate_furniture.py --mesh benchmarks/meshes/01_box.stl
 
-# Run benchmark suite (10 cases)
+# Run benchmark suite
 venv/bin/python3 scripts/run_mesh_suite.py
 
 # Analyze latest suite results
@@ -40,11 +42,12 @@ venv/bin/streamlit run app/streamlit_app.py
 ```
 Mesh file (.stl/.obj/.glb/.ply)
   → step3_first_principles.decompose_first_principles()
-    → extract planar/bend regions from mesh
+    → extract planar regions from mesh surface
+    → generate candidate parts (arbitrary 2D profiles)
     → score and select best candidates (within part budget)
     → synthesize joints between adjacent parts
-    → validate DFM rules
-  → FurnitureDesign
+    → validate DFM rules (SendCutSend CNC constraints)
+  → Design output
     → SVG export (red=cut, blue=engrave)
     → DXF export
     → metrics.json (quality scores, violations)
@@ -58,7 +61,7 @@ Mesh file (.stl/.obj/.glb/.ply)
 - **run_protocol.py** — Run directory management: `prepare_run_dir()`, manifest/metrics writing.
 - **furniture.py** — Foundation types: `Component`, `Joint`, `AssemblyGraph`, `FurnitureDesign`.
 - **materials.py** — SendCutSend material catalog (`MATERIALS` dict, `Material` dataclass).
-- **dfm_rules.py** — Design-for-manufacturing validation rules.
+- **dfm_rules.py** — Design-for-manufacturing validation against SendCutSend CNC constraints.
 - **geometry_primitives.py** — Geometric helpers for profiles, polygons, transforms.
 - **svg_exporter.py** — CNC-ready SVG with nested layout packing.
 - **dxf_exporter.py** — DXF export for CAM systems.
@@ -74,7 +77,7 @@ Mesh file (.stl/.obj/.glb/.ply)
 - **data.py** — Pure data helpers for the UI (no Streamlit imports).
 
 **Benchmarks (`benchmarks/`):**
-- **mesh_suite.json** — Suite definition (10 cases).
+- **mesh_suite.json** — Suite definition.
 - **meshes/** — Tracked STL test meshes.
 - **generate_meshes.py** — Script to regenerate benchmark meshes.
 
@@ -86,8 +89,9 @@ All imports use **bare module names** (e.g., `import furniture`, not `import src
 
 - All dimensions in **millimeters**
 - Positions as **numpy arrays**
-- Component profiles are 2D (x,y) polygons; thickness is a separate field
-- Rotations in **radians**
+- Component profiles are 2D (x,y) polygons — arbitrary shapes, not just rectangles
+- Thickness is a separate field per part
+- Rotations in **radians** (Euler XYZ, intrinsic convention: Rz @ Ry @ Rx)
 
 ## Development Workflow
 
