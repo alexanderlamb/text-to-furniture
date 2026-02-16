@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate 10 benchmark meshes of increasing complexity.
+"""Generate benchmark meshes of increasing complexity.
 
 All meshes are single connected watertight volumes suitable for
 flat-pack decomposition testing. Run once to populate benchmarks/meshes/.
@@ -121,6 +121,64 @@ def make_table_with_stretchers():
     return trimesh.boolean.union([top] + legs + [s1, s2])
 
 
+def make_v_bracket():
+    """11. V-bracket — two plates meeting at 60 degrees, non-perpendicular join."""
+    angle = np.radians(30)
+    plate = box(extents=[20, 200, 250])
+
+    p1 = plate.copy()
+    rot1 = trimesh.transformations.rotation_matrix(angle, [0, 1, 0])
+    p1.apply_transform(rot1)
+    p1.apply_translation([60, 0, 100])
+
+    p2 = plate.copy()
+    rot2 = trimesh.transformations.rotation_matrix(-angle, [0, 1, 0])
+    p2.apply_transform(rot2)
+    p2.apply_translation([-60, 0, 100])
+
+    base = box(extents=[160, 200, 20])
+    return trimesh.boolean.union([p1, p2, base])
+
+
+def make_angled_flange():
+    """12. Compound-angle flange — plate with a flange tilted in two axes."""
+    base = box(extents=[300, 200, 20])
+
+    flange = box(extents=[20, 200, 150])
+    rx = trimesh.transformations.rotation_matrix(np.radians(25), [1, 0, 0])
+    ry = trimesh.transformations.rotation_matrix(np.radians(15), [0, 1, 0])
+    flange.apply_transform(rx @ ry)
+    flange.apply_translation([-140, 20, 80])
+
+    return trimesh.boolean.union([base, flange])
+
+
+def make_trapezoidal_tray():
+    """13. Trapezoidal tray — bottom plate + 4 walls angled inward at 12 deg."""
+    bottom = box(extents=[300, 200, 15])
+    wall_h = 120
+    wall_t = 15
+    tilt = np.radians(12)
+
+    front = box(extents=[300, wall_t, wall_h])
+    front.apply_transform(trimesh.transformations.rotation_matrix(tilt, [1, 0, 0]))
+    front.apply_translation([0, -90, 55])
+
+    back = box(extents=[300, wall_t, wall_h])
+    back.apply_transform(trimesh.transformations.rotation_matrix(-tilt, [1, 0, 0]))
+    back.apply_translation([0, 90, 55])
+
+    left = box(extents=[wall_t, 200, wall_h])
+    left.apply_transform(trimesh.transformations.rotation_matrix(-tilt, [0, 1, 0]))
+    left.apply_translation([-140, 0, 55])
+
+    right = box(extents=[wall_t, 200, wall_h])
+    right.apply_transform(trimesh.transformations.rotation_matrix(tilt, [0, 1, 0]))
+    right.apply_translation([140, 0, 55])
+
+    return trimesh.boolean.union([bottom, front, back, left, right])
+
+
 GENERATORS = [
     ("01_box", make_box),
     ("02_tall_cabinet", make_tall_cabinet),
@@ -132,6 +190,9 @@ GENERATORS = [
     ("08_shelf_unit", make_shelf_unit),
     ("09_desk", make_desk),
     ("10_table_with_stretchers", make_table_with_stretchers),
+    ("11_v_bracket", make_v_bracket),
+    ("12_angled_flange", make_angled_flange),
+    ("13_trapezoidal_tray", make_trapezoidal_tray),
 ]
 
 

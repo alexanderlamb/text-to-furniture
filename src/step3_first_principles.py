@@ -12,7 +12,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import trimesh
-from shapely.geometry import MultiPoint, Polygon
+from shapely.geometry import LineString, MultiPoint, MultiPolygon, Polygon, box
+from shapely.ops import unary_union
 
 from dfm_rules import DFMConfig, DFMViolation, check_part_dfm
 from furniture import (
@@ -99,6 +100,7 @@ class Step3Input:
     enable_intersection_filter: bool = True
     allow_joint_intent_intersections: bool = True
     intersection_clearance_mm: float = 0.5
+    mesh_clip_min_area_ratio: float = 0.25
 
 
 @dataclass
@@ -233,6 +235,76 @@ class Step3Output:
         }
 
 
+def _serialize_parts_snapshot(
+    label: str,
+    index: int,
+    parts: List[ManufacturingPart],
+    joints: Optional[List[JointSpec]] = None,
+) -> dict:
+    """Serialize current parts state for phase step-through debugging."""
+    parts_payload = []
+    for part in parts:
+        parts_payload.append(
+            {
+                "part_id": part.part_id,
+                "region_type": part.region_type.value,
+                "material_key": part.material_key,
+                "thickness_mm": part.thickness_mm,
+                "outline_2d": list(part.profile.outline.exterior.coords),
+                "cutouts_2d": [
+                    list(c.exterior.coords) for c in part.profile.cutouts
+                ],
+                "bend_ops": [
+                    {
+                        "line": [list(op.line[0]), list(op.line[1])],
+                        "angle_deg": op.angle_deg,
+                        "radius_mm": op.radius_mm,
+                        "direction": op.direction,
+                        "sequence_index": op.sequence_index,
+                    }
+                    for op in part.bend_ops
+                ],
+                "position_3d": [float(v) for v in part.position_3d],
+                "origin_3d": [
+                    float(v)
+                    for v in (
+                        part.profile.origin_3d
+                        + part.metadata.get("stack_layer_offset_mm", 0.0)
+                        * _rotation_to_normal(part.rotation_3d)
+                    )
+                ]
+                if part.profile.origin_3d is not None
+                else [float(v) for v in part.position_3d],
+                "rotation_3d": [float(v) for v in part.rotation_3d],
+                "source_area_mm2": float(part.source_area_mm2),
+                "metadata": part.metadata,
+            }
+        )
+
+    joints_payload = []
+    if joints:
+        joints_payload = [
+            {
+                "joint_type": j.joint_type,
+                "part_a": j.part_a,
+                "part_b": j.part_b,
+                "geometry": j.geometry,
+                "clearance_mm": j.clearance_mm,
+                "fastener_spec": j.fastener_spec,
+            }
+            for j in joints
+        ]
+
+    return {
+        "phase_label": label,
+        "phase_index": index,
+        "part_count": len(parts_payload),
+        "units": "mm",
+        "parts": parts_payload,
+        "joints": joints_payload,
+    }
+
+
 @dataclass
 class _RegionCandidate:
     region_type: RegionType
@@ -244,6 +316,9 @@ class _RegionCandidate:
     bend_ops: List[BendOp]
     score: float
     metadata: Dict[str, float | int | str] = field(default_factory=dict)
+    basis_u: Optional[np.ndarray] = None
+    basis_v: Optional[np.ndarray] = None
+    origin_3d: Optional[np.ndarray] = None
 
 
 def build_default_capability_profile(
@@ -293,7 +368,8 @@ def decompose_first_principles(input_spec: Step3Input) -> Step3Output:
         thickness_mm=thickness_mm,
         input_spec=input_spec,
     )
-    candidates, merged_planar_pairs = _collapse_planar_face_pairs(raw_candidates)
+    coplanar_grouped = _merge_coplanar_candidates(raw_candidates, mesh)
+    candidates, merged_planar_pairs = _collapse_planar_face_pairs(coplanar_grouped)
     timers["candidate_generation_s"] = time.perf_counter() - t1
 
     if not candidates:
@@ -305,11 +381,21 @@ def decompose_first_principles(input_spec: Step3Input) -> Step3Output:
 
     t2 = time.perf_counter()
     selected_parts, selection_debug = _select_candidates(candidates, input_spec)
+    phase_snapshots = [
+        _serialize_parts_snapshot("Selected parts", 0, selected_parts),
+    ]
+    selected_parts, constrain_snapshots = _constrain_outlines(
+        selected_parts, mesh, input_spec
+    )
+    phase_snapshots.extend(constrain_snapshots)
     joints = _synthesize_joint_specs(
         selected_parts,
         joint_distance_mm=input_spec.joint_distance_mm,
         contact_tolerance_mm=input_spec.joint_contact_tolerance_mm,
         parallel_dot_threshold=input_spec.joint_parallel_dot_threshold,
+    )
+    phase_snapshots.append(
+        _serialize_parts_snapshot("With joints", 5, selected_parts, joints)
     )
     design = _build_design(input_spec.design_name, selected_parts, joints, material_key)
     timers["selection_and_assembly_s"] = time.perf_counter() - t2
@@ -368,6 +454,7 @@ def decompose_first_principles(input_spec: Step3Input) -> Step3Output:
         "joint_contact_tolerance_mm": float(input_spec.joint_contact_tolerance_mm),
         "joint_parallel_dot_threshold": float(input_spec.joint_parallel_dot_threshold),
         "timings": timers,
+        "phase_snapshots": phase_snapshots,
         **selection_debug,
     }
     design.metadata["step3_first_principles"] = debug
@@ -463,7 +550,9 @@ def _extract_candidates(
             continue
 
         normal = np.array(mesh.facets_normal[idx], dtype=float)
-        polygon = _project_faces_to_hull(mesh, face_indices, normal)
+        polygon, basis_u, basis_v, proj_origin = _project_faces_to_outline(
+            mesh, face_indices, normal
+        )
         if polygon is None:
             continue
 
@@ -472,6 +561,9 @@ def _extract_candidates(
             outline=polygon,
             material_key=material_key,
             thickness_mm=thickness_mm,
+            basis_u=basis_u,
+            basis_v=basis_v,
+            origin_3d=proj_origin,
         )
         candidates.append(
             _RegionCandidate(
@@ -484,6 +576,9 @@ def _extract_candidates(
                 bend_ops=[],
                 score=area,
                 metadata={"kind": "facet"},
+                basis_u=basis_u,
+                basis_v=basis_v,
+                origin_3d=proj_origin,
             )
         )
         covered_faces.update(face_indices)
@@ -628,31 +723,58 @@ def _build_bend_candidate(
     )
 
 
-def _project_faces_to_hull(
+def _project_faces_to_outline(
     mesh: trimesh.Trimesh,
     face_indices: List[int],
     normal: np.ndarray,
-) -> Optional[Polygon]:
+) -> Tuple[Optional[Polygon], np.ndarray, np.ndarray, np.ndarray]:
+    """Project mesh faces to 2D using triangle union (concave-accurate).
+
+    Returns (polygon, basis_u, basis_v, origin_3d).
+    Falls back to convex hull only if the union is degenerate.
+    """
     vertices = mesh.vertices[mesh.faces[face_indices]].reshape(-1, 3)
     if len(vertices) < 3:
-        return None
+        return None, np.zeros(3), np.zeros(3), np.zeros(3)
 
     centroid = np.mean(vertices, axis=0)
     n = normal / max(np.linalg.norm(normal), 1e-8)
     u_axis, v_axis = _plane_basis(n)
 
-    local = vertices - centroid
-    points_2d = np.column_stack([local @ u_axis, local @ v_axis])
-    hull = MultiPoint(points_2d).convex_hull
-    if hull.geom_type != "Polygon":
-        return None
+    # Project each triangle individually and union them
+    triangles_3d = mesh.vertices[mesh.faces[face_indices]]  # (N, 3, 3)
+    tri_polys: List[Polygon] = []
+    for tri in triangles_3d:
+        local = tri - centroid
+        pts_2d = [(float(p @ u_axis), float(p @ v_axis)) for p in local]
+        try:
+            p = Polygon(pts_2d)
+            if p.is_valid and p.area > 0:
+                tri_polys.append(p)
+        except Exception:
+            continue
 
-    polygon = _clean_polygon(hull)
+    polygon: Optional[Polygon] = None
+    if tri_polys:
+        merged = unary_union(tri_polys)
+        if isinstance(merged, MultiPolygon):
+            merged = max(merged.geoms, key=lambda g: g.area)
+        if merged.geom_type == "Polygon" and not merged.is_empty:
+            polygon = merged.simplify(0.5, preserve_topology=True)
+            polygon = _clean_polygon(polygon)
+
+    # Fallback to convex hull if triangle union failed
     if polygon is None:
-        return None
-    if polygon.area < 1.0:
-        return None
-    return polygon
+        local = vertices - centroid
+        points_2d = np.column_stack([local @ u_axis, local @ v_axis])
+        hull = MultiPoint(points_2d).convex_hull
+        if hull.geom_type != "Polygon":
+            return None, u_axis, v_axis, centroid
+        polygon = _clean_polygon(hull)
+
+    if polygon is None or polygon.area < 1.0:
+        return None, u_axis, v_axis, centroid
+    return polygon, u_axis, v_axis, centroid
 
 
 def _clean_polygon(polygon: Polygon) -> Optional[Polygon]:
@@ -763,7 +885,7 @@ def _is_opposite_planar_pair(a: _RegionCandidate, b: _RegionCandidate) -> bool:
         return False
 
     area_rel = abs(a.area_mm2 - b.area_mm2) / max(a.area_mm2, b.area_mm2, 1e-6)
-    if area_rel > 0.12:
+    if area_rel > 0.30:
         return False
 
     dims_a = _candidate_outline_dims(a)
@@ -772,7 +894,7 @@ def _is_opposite_planar_pair(a: _RegionCandidate, b: _RegionCandidate) -> bool:
         abs(dims_a[0] - dims_b[0]) / max(dims_a[0], dims_b[0], 1e-6),
         abs(dims_a[1] - dims_b[1]) / max(dims_a[1], dims_b[1], 1e-6),
     )
-    if dim_rel > 0.15:
+    if dim_rel > 0.25:
         return False
 
     delta = b.position_3d - a.position_3d
@@ -805,14 +927,128 @@ def _merge_planar_pair(
     return _RegionCandidate(
         region_type=RegionType.PLANAR_CUT,
         profile=chosen.profile,
-        normal=_canonicalize_normal(chosen.normal),
+        # Keep the chosen face normal so local profile coordinates and
+        # downstream rotation_3d stay in the same frame.
+        normal=chosen.normal,
         position_3d=0.5 * (a.position_3d + b.position_3d),
         area_mm2=max(a.area_mm2, b.area_mm2),
         source_faces=merged_faces,
         bend_ops=[],
         score=max(a.score, b.score),
         metadata=merged_metadata,
+        basis_u=chosen.basis_u,
+        basis_v=chosen.basis_v,
+        origin_3d=chosen.origin_3d,
     )
+
+
+def _merge_coplanar_candidates(
+    candidates: List[_RegionCandidate],
+    mesh: trimesh.Trimesh,
+) -> List[_RegionCandidate]:
+    """Group same-plane planar candidates into compound candidates.
+
+    Candidates with near-identical normals (dot > 0.99) and plane offsets
+    (within 1 mm) are merged.  Their source faces are combined and
+    re-projected into a single outline.
+    """
+    planar = [
+        (idx, cand)
+        for idx, cand in enumerate(candidates)
+        if cand.region_type == RegionType.PLANAR_CUT
+    ]
+    non_planar = [
+        cand for cand in candidates if cand.region_type != RegionType.PLANAR_CUT
+    ]
+    if not planar:
+        return list(candidates)
+
+    # Bucket by canonical normal direction + plane offset
+    groups: Dict[int, List[int]] = {}  # group_id -> list of indices into planar
+    group_of: Dict[int, int] = {}  # planar list index -> group_id
+    next_group = 0
+
+    for i, (_, cand_i) in enumerate(planar):
+        if i in group_of:
+            continue
+        group_of[i] = next_group
+        groups[next_group] = [i]
+        n_i = cand_i.normal / max(np.linalg.norm(cand_i.normal), 1e-8)
+        offset_i = float(np.dot(cand_i.position_3d, n_i))
+
+        for j in range(i + 1, len(planar)):
+            if j in group_of:
+                continue
+            _, cand_j = planar[j]
+            n_j = cand_j.normal / max(np.linalg.norm(cand_j.normal), 1e-8)
+            # Same direction (not opposite — opposite pairs are handled later)
+            if abs(float(np.dot(n_i, n_j))) < 0.99:
+                continue
+            # Same plane offset
+            sign = 1.0 if float(np.dot(n_i, n_j)) > 0 else -1.0
+            offset_j = float(np.dot(cand_j.position_3d, sign * n_j))
+            if abs(offset_i - offset_j) > 1.0:
+                continue
+            group_of[j] = next_group
+            groups[next_group].append(j)
+
+        next_group += 1
+
+    merged_planar: List[_RegionCandidate] = []
+    for gid, members in groups.items():
+        if len(members) == 1:
+            merged_planar.append(planar[members[0]][1])
+            continue
+
+        # Merge: combine source_faces, re-project outline
+        all_faces: List[int] = []
+        total_area = 0.0
+        for m in members:
+            cand_m = planar[m][1]
+            all_faces.extend(cand_m.source_faces)
+            total_area += cand_m.area_mm2
+        all_faces = sorted(set(all_faces))
+
+        # Use the largest member as the reference for normal / basis
+        ref_idx = max(members, key=lambda m: planar[m][1].area_mm2)
+        ref_cand = planar[ref_idx][1]
+        normal = ref_cand.normal
+
+        polygon, basis_u, basis_v, proj_origin = _project_faces_to_outline(
+            mesh, all_faces, normal
+        )
+        if polygon is None:
+            # Fallback: keep members unmerged
+            for m in members:
+                merged_planar.append(planar[m][1])
+            continue
+
+        profile = PartProfile2D(
+            outline=polygon,
+            material_key=ref_cand.profile.material_key,
+            thickness_mm=ref_cand.profile.thickness_mm,
+            basis_u=basis_u,
+            basis_v=basis_v,
+            origin_3d=proj_origin,
+        )
+        merged_planar.append(
+            _RegionCandidate(
+                region_type=RegionType.PLANAR_CUT,
+                profile=profile,
+                normal=normal,
+                position_3d=proj_origin,
+                area_mm2=total_area,
+                source_faces=all_faces,
+                bend_ops=[],
+                score=total_area,
+                metadata={"kind": "facet", "coplanar_merged_count": len(members)},
+                basis_u=basis_u,
+                basis_v=basis_v,
+                origin_3d=proj_origin,
+            )
+        )
+
+    return merged_planar + non_planar
 
 
 def _collapse_planar_face_pairs(
@@ -848,7 +1084,7 @@ def _collapse_planar_face_pairs(
             delta_n = abs(delta_n_signed)
             delta_t = float(np.linalg.norm(delta - delta_n_signed * n_a))
             area_rel = abs(a.area_mm2 - b.area_mm2) / max(a.area_mm2, b.area_mm2, 1e-6)
-            cost = delta_t + 0.25 * delta_n + 50.0 * area_rel
+            cost = delta_t + 0.25 * delta_n + 30.0 * area_rel
             if cost < best_cost:
                 best_cost = cost
                 best_j = j
@@ -874,16 +1110,12 @@ def _select_candidates(
     input_spec: Step3Input,
 ) -> Tuple[List[ManufacturingPart], Dict[str, object]]:
     part_budget_max = max(1, int(input_spec.part_budget_max))
-    ranked_indices = sorted(
-        range(len(candidates)),
-        key=lambda idx: candidates[idx].score,
-        reverse=True,
-    )
+    ranked_indices = _greedy_coverage_rank(candidates)
     if not ranked_indices:
         return [], {"stack_enabled": bool(input_spec.enable_planar_stacking)}
 
     extra_layer_gain = float(np.clip(input_spec.stack_extra_layer_gain, 0.0, 1.5))
-    layer_options: List[Tuple[float, int, int]] = []
+    layer_options: List[Tuple[float, float, int, int]] = []  # (sort_gain, gain, rank, cand_idx)
     target_layers_by_candidate: Dict[int, int] = {}
     member_thickness_by_candidate: Dict[int, float] = {}
     score_factor_by_candidate: Dict[int, float] = {}
@@ -928,6 +1160,11 @@ def _select_candidates(
         elif thin_side_state == "dropped":
             thin_side_dropped_count += 1
 
+    # Collect all source faces across candidates for novelty computation
+    all_source_faces: set[int] = set()
+    for cand_idx in ranked_indices:
+        all_source_faces.update(candidates[cand_idx].source_faces)
+
     for rank, cand_idx in enumerate(ranked_indices):
         cand = candidates[cand_idx]
         score_factor = score_factor_by_candidate.get(cand_idx, 1.0)
@@ -940,13 +1177,20 @@ def _select_candidates(
             else:
                 gain = float(cand.score) * extra_layer_gain * (0.85 ** (layer_idx - 1))
             gain *= score_factor
-            layer_options.append((gain, rank, cand_idx))
+            sort_gain = gain
+            # Coverage breadth boost: first-layer candidates get a novelty bonus
+            # proportional to how many faces they uniquely cover. Stack layers
+            # (layer_idx > 0) add no new face coverage, so they get no boost.
+            if layer_idx == 0 and cand.source_faces:
+                novelty = len(cand.source_faces) / max(len(all_source_faces), 1)
+                sort_gain = gain * (1.0 + 0.6 * novelty)
+            layer_options.append((sort_gain, gain, rank, cand_idx))
 
-    layer_options.sort(key=lambda item: (-item[0], item[1]))
+    layer_options.sort(key=lambda item: (-item[0], item[2]))
     selected = layer_options[:part_budget_max]
 
     selected_layer_count: Dict[int, int] = {}
-    for _, _, cand_idx in selected:
+    for _, _, _, cand_idx in selected:
         selected_layer_count[cand_idx] = selected_layer_count.get(cand_idx, 0) + 1
 
     parts: List[ManufacturingPart] = []
@@ -1000,6 +1244,14 @@ def _select_candidates(
                 base_gain *= extra_layer_gain * (0.85 ** (layer_idx - 1))
             metadata["selection_gain"] = float(base_gain * score_factor)
 
+            # outline_2d is defined in the candidate's local plane frame.
+            # Use the same frame anchor (origin_3d) for position_3d when available.
+            base_anchor = (
+                np.asarray(cand.origin_3d, dtype=float)
+                if cand.origin_3d is not None
+                else np.asarray(cand.position_3d, dtype=float)
+            )
+
             parts.append(
                 ManufacturingPart(
                     part_id=part_id,
@@ -1007,7 +1259,7 @@ def _select_candidates(
                     thickness_mm=cand.profile.thickness_mm,
                     profile=cand.profile,
                     region_type=cand.region_type,
-                    position_3d=np.asarray(cand.position_3d, dtype=float) + offset * normal,
+                    position_3d=base_anchor + offset * normal,
                     rotation_3d=_normal_to_rotation(cand.normal),
                     source_area_mm2=cand.area_mm2,
                     source_faces=list(cand.source_faces),
@@ -1300,7 +1552,10 @@ def _filter_invalid_part_intersections(
                 local_allowed_stack += 1
                 continue
 
-            if allow_joint_intent and _has_joint_intent(part, prev, joint_distance_mm):
+            # Use plane geometry to decide: only parallel parts on the same
+            # plane can genuinely occupy the same space.  Non-parallel OBB
+            # overlap is expected at joint edges.
+            if not _is_genuine_plane_conflict(part, prev, clearance_mm):
                 allowed_joint_intent_count += 1
                 local_allowed_joint_intent += 1
                 continue
@@ -1332,21 +1587,31 @@ def _filter_invalid_part_intersections(
     return kept, debug
 
 
-def _has_joint_intent(
+def _is_genuine_plane_conflict(
     a: ManufacturingPart,
     b: ManufacturingPart,
-    joint_distance_mm: float,
+    clearance_mm: float,
 ) -> bool:
-    if a.region_type != RegionType.PLANAR_CUT or b.region_type != RegionType.PLANAR_CUT:
-        return False
+    """Check if two parts with overlapping OBBs genuinely occupy the same space.
 
+    Only near-parallel parts on the same plane are real conflicts.
+    Non-parallel parts (perpendicular walls meeting a shelf, etc.) overlap
+    at joint edges — that's expected geometry, not a conflict.
+    """
     n_a = _rotation_to_normal(a.rotation_3d)
     n_b = _rotation_to_normal(b.rotation_3d)
-    if abs(float(np.dot(n_a, n_b))) > 0.35:
+
+    # Non-parallel parts can't conflict: OBB overlap is at joint edges
+    if abs(float(np.dot(n_a, n_b))) < 0.85:
         return False
 
-    center_dist = float(np.linalg.norm(a.position_3d - b.position_3d))
-    if center_dist > float(max(1.0, joint_distance_mm)):
+    # Parallel parts: only conflict if on the same plane
+    delta = b.position_3d - a.position_3d
+    normal_dist = abs(float(np.dot(delta, n_a)))
+    max_thickness = max(a.thickness_mm, b.thickness_mm)
+
+    # Separated by more than one sheet thickness → different parallel planes
+    if normal_dist > max_thickness + clearance_mm:
         return False
 
     return True
@@ -1867,3 +2132,708 @@ def _empty_output(
         status="fail",
         debug=debug,
     )
+
+
+# ─── Greedy coverage ranking ────────────────────────────────────────────────
+
+
+def _greedy_coverage_rank(candidates: List[_RegionCandidate]) -> List[int]:
+    """Rank candidates using greedy set-cover to maximize face coverage.
+
+    Instead of pure area/score ranking, each iteration picks the candidate
+    whose source faces provide the most marginal gain (uncovered faces).
+    """
+    covered_faces: set[int] = set()
+    ranked: List[int] = []
+    remaining = set(range(len(candidates)))
+
+    while remaining:
+        best_idx = -1
+        best_gain = -float("inf")
+
+        for idx in remaining:
+            cand = candidates[idx]
+            if not cand.source_faces:
+                gain = cand.score
+            else:
+                uncovered = sum(1 for f in cand.source_faces if f not in covered_faces)
+                total = max(1, len(cand.source_faces))
+                gain = cand.score * (uncovered / total)
+
+            if gain > best_gain:
+                best_gain = gain
+                best_idx = idx
+
+        if best_idx < 0:
+            break
+
+        ranked.append(best_idx)
+        remaining.remove(best_idx)
+        covered_faces.update(candidates[best_idx].source_faces)
+
+    return ranked
+
+
+# ─── Grow-then-constrain phase ───────────────────────────────────────────────
+
+
+def _constrain_outlines(
+    parts: List[ManufacturingPart],
+    mesh: trimesh.Trimesh,
+    input_spec: Step3Input,
+) -> Tuple[List[ManufacturingPart], List[dict]]:
+    """Grow-then-constrain: expand outlines freely, clip by planes, clip by mesh."""
+    snapshots: List[dict] = []
+    if not parts:
+        return parts, snapshots
+
+    # Phase A: grow each outline to cover coplanar mesh faces
+    grown: List[ManufacturingPart] = []
+    for part in parts:
+        if part.region_type != RegionType.PLANAR_CUT:
+            grown.append(part)
+            continue
+
+        profile = part.profile
+        if profile.basis_u is None or profile.basis_v is None or profile.origin_3d is None:
+            grown.append(part)
+            continue
+
+        grown_outline = _compute_coplanar_extent(mesh, profile, part.rotation_3d)
+        if grown_outline.is_empty or grown_outline.area <= profile.outline.area:
+            grown.append(part)
+            continue
+
+        # Only grow, never shrink: union the original outline with the grown extent
+        new_outline = unary_union([profile.outline, grown_outline])
+        if not isinstance(new_outline, Polygon):
+            new_outline = _largest_polygon(new_outline)
+        if new_outline is None or new_outline.is_empty:
+            grown.append(part)
+            continue
+
+        new_profile = PartProfile2D(
+            outline=new_outline,
+            cutouts=profile.cutouts,
+            features=profile.features,
+            material_key=profile.material_key,
+            thickness_mm=profile.thickness_mm,
+            basis_u=profile.basis_u,
+            basis_v=profile.basis_v,
+            origin_3d=profile.origin_3d,
+        )
+        grown.append(
+            ManufacturingPart(
+                part_id=part.part_id,
+                material_key=part.material_key,
+                thickness_mm=part.thickness_mm,
+                profile=new_profile,
+                region_type=part.region_type,
+                position_3d=part.position_3d.copy(),
+                rotation_3d=part.rotation_3d.copy(),
+                source_area_mm2=part.source_area_mm2,
+                source_faces=list(part.source_faces),
+                bend_ops=list(part.bend_ops),
+                metadata=dict(part.metadata),
+            )
+        )
+
+    snapshots.append(_serialize_parts_snapshot("Grown (coplanar)", 1, grown))
+
+    # Phase B: trim at plane-plane intersections
+    trimmed = _trim_at_plane_intersections(grown, input_spec)
+
+    snapshots.append(_serialize_parts_snapshot("Trimmed (planes)", 2, trimmed))
+
+    # Phase C: clip against mesh volume (cross-section)
+    clipped: List[ManufacturingPart] = []
+    for part in trimmed:
+        if part.region_type != RegionType.PLANAR_CUT:
+            clipped.append(part)
+            continue
+
+        profile = part.profile
+        if profile.basis_u is None or profile.basis_v is None or profile.origin_3d is None:
+            clipped.append(part)
+            continue
+
+        cross_section = _compute_mesh_cross_section(mesh, profile, part.rotation_3d)
+        if cross_section is None or cross_section.is_empty:
+            clipped.append(part)
+            continue
+
+        try:
+            new_outline = profile.outline.intersection(cross_section)
+        except Exception:
+            clipped.append(part)
+            continue
+
+        new_outline = _largest_polygon(new_outline)
+        if new_outline is None or new_outline.is_empty:
+            clipped.append(part)
+            continue
+
+        # Guard: skip mesh clip if it would catastrophically shrink the outline.
+        # This catches cases where the cross-section at the part's plane does not
+        # represent the face's footprint (e.g. horizontal faces on step geometries).
+        original_area = profile.outline.area
+        area_ratio = new_outline.area / original_area if original_area > 0 else 1.0
+        if (
+            area_ratio < input_spec.mesh_clip_min_area_ratio
+            or new_outline.area < input_spec.min_planar_region_area_mm2
+        ):
+            clipped.append(part)
+            continue
+
+        new_outline = new_outline.simplify(0.5, preserve_topology=True)
+        new_profile = PartProfile2D(
+            outline=new_outline,
+            cutouts=profile.cutouts,
+            features=profile.features,
+            material_key=profile.material_key,
+            thickness_mm=profile.thickness_mm,
+            basis_u=profile.basis_u,
+            basis_v=profile.basis_v,
+            origin_3d=profile.origin_3d,
+        )
+        clipped.append(
+            ManufacturingPart(
+                part_id=part.part_id,
+                material_key=part.material_key,
+                thickness_mm=part.thickness_mm,
+                profile=new_profile,
+                region_type=part.region_type,
+                position_3d=part.position_3d.copy(),
+                rotation_3d=part.rotation_3d.copy(),
+                source_area_mm2=part.source_area_mm2,
+                source_faces=list(part.source_faces),
+                bend_ops=list(part.bend_ops),
+                metadata=dict(part.metadata),
+            )
+        )
+
+    snapshots.append(_serialize_parts_snapshot("Clipped (mesh)", 3, clipped))
+
+    # Phase D: split oversized parts
+    max_w = input_spec.scs_capabilities.max_sheet_width_mm
+    max_h = input_spec.scs_capabilities.max_sheet_height_mm
+    final: List[ManufacturingPart] = []
+    for part in clipped:
+        bounds = part.profile.outline.bounds
+        w = bounds[2] - bounds[0]
+        h = bounds[3] - bounds[1]
+        if w > max_w or h > max_h:
+            final.extend(_split_oversized_part(part, max_w, max_h, input_spec))
+        else:
+            final.append(part)
+
+    # Phase E: drop parts below minimum area
+    result: List[ManufacturingPart] = []
+    for part in final:
+        if part.profile.outline.is_empty:
+            continue
+        if part.profile.outline.area < input_spec.min_planar_region_area_mm2:
+            continue
+        result.append(part)
+
+    snapshots.append(_serialize_parts_snapshot("Final", 4, result))
+
+    return result, snapshots
+
+
+def _compute_mesh_cross_section(
+    mesh: trimesh.Trimesh,
+    profile: PartProfile2D,
+    rotation_3d: np.ndarray,
+) -> Optional[Polygon]:
+    """Compute the mesh cross-section at this part's plane, in the part's 2D frame.
+
+    Uses trimesh.section() to slice the mesh volume and projects the resulting
+    contour onto the part's local coordinate system.  Falls back to a slightly
+    inward-offset slice when the plane sits exactly on a mesh face.
+    """
+    normal = _rotation_to_normal(rotation_3d)
+    origin = profile.origin_3d
+    basis_u = profile.basis_u
+    basis_v = profile.basis_v
+
+    # Collect cross-sections from all offsets and union them.
+    # On step boundaries the solid volume differs on each side of the face,
+    # so a single offset captures only one side.  Unioning all offsets gives
+    # the complete profile.
+    polys: List[Polygon] = []
+    for offset in [0.0, -0.1, 0.1]:
+        try:
+            plane_pt = origin + offset * normal
+            section = mesh.section(plane_origin=plane_pt, plane_normal=normal)
+        except Exception:
+            continue
+        if section is None:
+            continue
+
+        try:
+            discrete = section.discrete
+        except Exception:
+            continue
+
+        for path_verts in discrete:
+            local = path_verts - origin
+            pts_2d = [(float(p @ basis_u), float(p @ basis_v)) for p in local]
+            if len(pts_2d) < 3:
+                continue
+            try:
+                p = Polygon(pts_2d)
+                if not p.is_valid:
+                    p = p.buffer(0)
+                if isinstance(p, MultiPolygon):
+                    p = max(p.geoms, key=lambda g: g.area)
+                if p.is_valid and p.area > 1.0:
+                    polys.append(p)
+            except Exception:
+                continue
+
+    if not polys:
+        return None
+
+    merged = unary_union(polys)
+    result = _largest_polygon(merged)
+    if result is not None:
+        result = result.simplify(0.5, preserve_topology=True)
+    return result
+
+
+def _compute_coplanar_extent(
+    mesh: trimesh.Trimesh,
+    profile: PartProfile2D,
+    rotation_3d: np.ndarray,
+    inset_mm: float = 0.5,
+) -> Polygon:
+    """Grow a part's outline by cross-sectioning the mesh just inside the surface.
+
+    Takes a cross-section of the mesh at ``origin - inset_mm * normal``,
+    projects the resulting contour into the part's 2-D frame, and keeps
+    only the connected component that overlaps the original outline.
+    Returns the bounding box of that region.
+
+    Falls back to the original outline when the section is empty or
+    no connected component is found.
+    """
+    normal = _rotation_to_normal(rotation_3d)
+    origin = profile.origin_3d
+    basis_u = profile.basis_u
+    basis_v = profile.basis_v
+
+    # Try both inset directions — the canonical normal may point away from
+    # the mesh interior.  Pick whichever section yields more geometry.
+    best_section = None
+    for sign in (-1.0, 1.0):
+        s = mesh.section(
+            plane_origin=origin + sign * inset_mm * normal,
+            plane_normal=normal,
+        )
+        if s is None:
+            continue
+        if best_section is None or len(s.vertices) > len(best_section.vertices):
+            best_section = s
+    section = best_section
+
+    if section is None:
+        return profile.outline
+
+    # Build 2-D polygons from section entities in the part's local frame
+    polys: List[Polygon] = []
+    for ent in section.entities:
+        pts_3d = section.vertices[ent.points]
+        local = pts_3d - origin
+        pts_2d = np.column_stack([local @ basis_u, local @ basis_v])
+        try:
+            poly = Polygon(pts_2d)
+            if poly.is_valid and poly.area > 0.01:
+                polys.append(poly)
+        except Exception:
+            continue
+
+    if not polys:
+        return profile.outline
+
+    merged = unary_union(polys)
+    connected = _keep_connected(merged, profile.outline)
+
+    if connected.is_empty or connected.area < 1.0:
+        return profile.outline
+
+    b = connected.bounds
+    return box(b[0], b[1], b[2], b[3])
+
+
+def _keep_connected(geometry, reference: Polygon) -> Polygon:
+    """Keep only parts of a geometry that are connected to the reference polygon."""
+    if geometry.geom_type == "Polygon":
+        return geometry
+    if geometry.geom_type == "MultiPolygon":
+        connected = [g for g in geometry.geoms if g.intersects(reference)]
+        if not connected:
+            return reference
+        result = unary_union(connected)
+        if isinstance(result, MultiPolygon):
+            return max(result.geoms, key=lambda g: g.area)
+        if result.geom_type == "Polygon":
+            return result
+        return reference
+    return reference
+
+
+def _largest_polygon(geom) -> Optional[Polygon]:
+    """Extract the largest Polygon from a geometry."""
+    if geom is None or geom.is_empty:
+        return None
+    if geom.geom_type == "Polygon":
+        return geom
+    if geom.geom_type in ("MultiPolygon", "GeometryCollection"):
+        polys = [g for g in geom.geoms if g.geom_type == "Polygon" and not g.is_empty]
+        if polys:
+            return max(polys, key=lambda g: g.area)
+    return None
+
+
+def _deep_copy_part(part: ManufacturingPart) -> ManufacturingPart:
+    """Deep-copy a ManufacturingPart so mutations don't affect the original."""
+    p = part.profile
+    new_profile = PartProfile2D(
+        outline=Polygon(p.outline.exterior.coords,
+                        [list(h.coords) for h in p.outline.interiors]),
+        cutouts=list(p.cutouts),
+        features=list(p.features),
+        material_key=p.material_key,
+        thickness_mm=p.thickness_mm,
+        basis_u=p.basis_u.copy() if p.basis_u is not None else None,
+        basis_v=p.basis_v.copy() if p.basis_v is not None else None,
+        origin_3d=p.origin_3d.copy() if p.origin_3d is not None else None,
+    )
+    return ManufacturingPart(
+        part_id=part.part_id,
+        material_key=part.material_key,
+        thickness_mm=part.thickness_mm,
+        profile=new_profile,
+        region_type=part.region_type,
+        position_3d=part.position_3d.copy(),
+        rotation_3d=part.rotation_3d.copy(),
+        source_area_mm2=part.source_area_mm2,
+        source_faces=list(part.source_faces),
+        bend_ops=list(part.bend_ops),
+        metadata=dict(part.metadata),
+    )
+
+
+def _apply_trim_combination(
+    parts: List[ManufacturingPart],
+    groups: List[List[Tuple[int, int]]],
+    mask: int,
+) -> List[ManufacturingPart]:
+    """Apply one combination of trim directions and return the modified parts.
+
+    *groups* is a list of pair-groups.  Each group shares one decision bit:
+      bit=0 → for every (i, j) in the group, trim j against i's plane
+      bit=1 → for every (i, j) in the group, trim i against j's plane
+    """
+    copied = [_deep_copy_part(p) for p in parts]
+    for k, group in enumerate(groups):
+        for i, j in group:
+            pi = copied[i]
+            pj = copied[j]
+            n_i = _rotation_to_normal(pi.rotation_3d)
+            n_j = _rotation_to_normal(pj.rotation_3d)
+            if mask & (1 << k):
+                _trim_part_against_plane(pi, n_j, pj.profile.origin_3d, pj.thickness_mm)
+            else:
+                _trim_part_against_plane(pj, n_i, pi.profile.origin_3d, pi.thickness_mm)
+    return copied
+
+
+def _trim_loss_fraction(
+    part: ManufacturingPart,
+    other_normal: np.ndarray,
+    other_origin: np.ndarray,
+    other_thickness: float,
+) -> float:
+    """Return the fraction of part outline area removed by a trial trim.
+
+    Does NOT mutate the part — works on a copy.
+    """
+    area_before = part.profile.outline.area
+    if area_before < 1.0:
+        return 0.0
+    trial = _deep_copy_part(part)
+    _trim_part_against_plane(trial, other_normal, other_origin, other_thickness)
+    area_after = trial.profile.outline.area
+    return 1.0 - area_after / area_before
+
+
+_SIGNIFICANT_TRIM_THRESHOLD = 0.20  # 20 % area loss
+
+
+def _group_pairs_by_stack(
+    pairs: List[Tuple[int, int]],
+    parts: List[ManufacturingPart],
+) -> List[List[Tuple[int, int]]]:
+    """Group trim pairs that share the same stack-group combination.
+
+    Stacked siblings have the same plane orientation, so trimming any member
+    of stack A against any member of stack B produces nearly the same cut.
+    Grouping them into one decision bit collapses the search space.
+    """
+    key_to_pairs: Dict[Tuple[str, str], List[Tuple[int, int]]] = {}
+    for i, j in pairs:
+        sg_i = parts[i].metadata.get("stack_group_id", f"_solo_{i}")
+        sg_j = parts[j].metadata.get("stack_group_id", f"_solo_{j}")
+        key = (sg_i, sg_j)
+        key_to_pairs.setdefault(key, []).append((i, j))
+    return list(key_to_pairs.values())
+
+
+def _trim_at_plane_intersections(
+    parts: List[ManufacturingPart],
+    input_spec: Step3Input,
+) -> List[ManufacturingPart]:
+    """Trim part outlines at plane-plane intersection boundaries.
+
+    Pairs are classified as *significant* (either direction removes >20% of a
+    part's area) or *minor* (small corner clips / butt joints).  Minor pairs
+    use largest-area-wins directly.  Significant pairs are grouped by stack
+    membership (stacked siblings share one decision bit) and searched
+    exhaustively over the group mask to maximize total outline area.
+    """
+    # -- Collect intersecting pairs and classify --
+    minor_pairs: List[Tuple[int, int]] = []
+    significant_pairs: List[Tuple[int, int]] = []
+
+    for i in range(len(parts)):
+        for j in range(i + 1, len(parts)):
+            pi = parts[i]
+            pj = parts[j]
+
+            if pi.region_type != RegionType.PLANAR_CUT or pj.region_type != RegionType.PLANAR_CUT:
+                continue
+            if pi.profile.basis_u is None or pj.profile.basis_u is None:
+                continue
+
+            n_i = _rotation_to_normal(pi.rotation_3d)
+            n_j = _rotation_to_normal(pj.rotation_3d)
+
+            cross_norm = float(np.linalg.norm(np.cross(n_i, n_j)))
+            if cross_norm < 0.1:
+                continue
+
+            # Trial-trim both directions to measure area loss
+            loss_j = _trim_loss_fraction(pj, n_i, pi.profile.origin_3d, pi.thickness_mm)
+            loss_i = _trim_loss_fraction(pi, n_j, pj.profile.origin_3d, pj.thickness_mm)
+
+            if loss_i > _SIGNIFICANT_TRIM_THRESHOLD or loss_j > _SIGNIFICANT_TRIM_THRESHOLD:
+                significant_pairs.append((i, j))
+            else:
+                minor_pairs.append((i, j))
+
+    if not minor_pairs and not significant_pairs:
+        return parts
+
+    # -- Apply minor pairs with largest-area-wins (no search needed) --
+    minor_groups = [[(i, j)] for i, j in minor_pairs]
+    minor_mask = 0
+    for k, (i, j) in enumerate(minor_pairs):
+        area_i = parts[i].profile.outline.area
+        area_j = parts[j].profile.outline.area
+        if area_i < area_j:
+            minor_mask |= 1 << k
+    if minor_groups:
+        parts = _apply_trim_combination(parts, minor_groups, minor_mask)
+
+    if not significant_pairs:
+        return parts
+
+    # -- Group significant pairs by stack membership --
+    sig_groups = _group_pairs_by_stack(significant_pairs, parts)
+    n_groups = len(sig_groups)
+
+    # -- Safety valve on GROUP count (not raw pair count) --
+    if n_groups > 16:
+        fallback_mask = 0
+        for k, group in enumerate(sig_groups):
+            i, j = group[0]
+            area_i = parts[i].source_area_mm2
+            area_j = parts[j].source_area_mm2
+            if area_i < area_j:
+                fallback_mask |= 1 << k
+        return _apply_trim_combination(parts, sig_groups, fallback_mask)
+
+    # -- Exhaustive search over group bits --
+    # Score rewards useful area (capped at source geometry) and penalizes
+    # excess bbox padding that Phase C will clip away.  This prevents
+    # inflated bounding boxes from biasing trim direction decisions.
+    best_mask = 0
+    best_score = -float("inf")
+    n_combos = 1 << n_groups
+
+    for mask in range(n_combos):
+        candidate = _apply_trim_combination(parts, sig_groups, mask)
+        score = sum(
+            2.0 * min(p.profile.outline.area, p.source_area_mm2)
+            - p.profile.outline.area
+            for p in candidate
+        )
+        if score > best_score:
+            best_score = score
+            best_mask = mask
+
+    return _apply_trim_combination(parts, sig_groups, best_mask)
+
+
+def _trim_part_against_plane(
+    part: ManufacturingPart,
+    other_normal: np.ndarray,
+    other_origin: np.ndarray,
+    other_thickness_mm: float = 0.0,
+) -> None:
+    """Trim a part's outline to stay on its side of another part's plane.
+
+    Uses the half-plane inequality: n_other . (origin + u*x + v*y) >= d_other
+    which becomes a*x + b*y >= c in the part's 2D frame.
+
+    The cutting plane is offset inward by other_thickness_mm so that the
+    trimmed part butts against the inner face of the winning part, preventing
+    physical overlap of material volumes.
+    """
+    profile = part.profile
+    if profile.basis_u is None or profile.basis_v is None or profile.origin_3d is None:
+        return
+
+    a = float(np.dot(other_normal, profile.basis_u))
+    b = float(np.dot(other_normal, profile.basis_v))
+    # Offset the cutting plane inward by the winning part's thickness.
+    # The part surface is at d_other; material extends inward (against normal)
+    # by thickness_mm, so the inner face is at d_other - thickness.
+    d_other = float(np.dot(other_normal, other_origin)) - other_thickness_mm
+    c = d_other - float(np.dot(other_normal, profile.origin_3d))
+
+    ab_norm = math.sqrt(a * a + b * b)
+    if ab_norm < 1e-8:
+        return  # Other plane is parallel in this 2D projection
+
+    # Determine which side of the half-plane the outline centroid is on
+    cx = float(profile.outline.centroid.x)
+    cy = float(profile.outline.centroid.y)
+    centroid_side = a * cx + b * cy - c
+
+    if centroid_side >= 0:
+        # Centroid is on the >= side, keep that side (a*x + b*y >= c)
+        line_normal_2d = np.array([a, b]) / ab_norm
+    else:
+        # Centroid is on the < side, keep the opposite half-plane (a*x + b*y <= c)
+        # Equivalently: (-a)*x + (-b)*y >= -c
+        line_normal_2d = np.array([-a, -b]) / ab_norm
+
+    line_dir_2d = np.array([-line_normal_2d[1], line_normal_2d[0]])
+
+    # A point on the boundary line a*x + b*y = c
+    if abs(a) > abs(b):
+        line_pt = np.array([c / a, 0.0])
+    else:
+        line_pt = np.array([0.0, c / b])
+
+    # Build a large half-plane polygon
+    bounds = profile.outline.bounds
+    extent = max(bounds[2] - bounds[0], bounds[3] - bounds[1], 100.0) * 3.0
+
+    p1 = line_pt - extent * line_dir_2d
+    p2 = line_pt + extent * line_dir_2d
+    p3 = p2 + extent * line_normal_2d
+    p4 = p1 + extent * line_normal_2d
+
+    half_plane = Polygon([tuple(p1), tuple(p2), tuple(p3), tuple(p4)])
+
+    try:
+        result = profile.outline.intersection(half_plane)
+    except Exception:
+        return
+
+    result = _clean_polygon(result)
+    if result is not None and not result.is_empty and result.area > 1.0:
+        part.profile = PartProfile2D(
+            outline=result,
+            cutouts=profile.cutouts,
+            features=profile.features,
+            material_key=profile.material_key,
+            thickness_mm=profile.thickness_mm,
+            basis_u=profile.basis_u,
+            basis_v=profile.basis_v,
+            origin_3d=profile.origin_3d,
+        )
+
+
+def _split_oversized_part(
+    part: ManufacturingPart,
+    max_width: float,
+    max_height: float,
+    input_spec: Step3Input,
+) -> List[ManufacturingPart]:
+    """Split a part that exceeds sheet dimensions into tiles."""
+    outline = part.profile.outline
+    bounds = outline.bounds
+    w = bounds[2] - bounds[0]
+    h = bounds[3] - bounds[1]
+
+    cols = max(1, int(math.ceil(w / max_width)))
+    rows = max(1, int(math.ceil(h / max_height)))
+
+    if cols == 1 and rows == 1:
+        return [part]
+
+    tile_w = w / cols
+    tile_h = h / rows
+
+    result: List[ManufacturingPart] = []
+    for r in range(rows):
+        for c_idx in range(cols):
+            tile_minx = bounds[0] + c_idx * tile_w
+            tile_miny = bounds[1] + r * tile_h
+            tile_box = Polygon(
+                [
+                    (tile_minx, tile_miny),
+                    (tile_minx + tile_w, tile_miny),
+                    (tile_minx + tile_w, tile_miny + tile_h),
+                    (tile_minx, tile_miny + tile_h),
+                ]
+            )
+
+            tile_outline = outline.intersection(tile_box)
+            tile_polygon = _largest_polygon(tile_outline)
+
+            if tile_polygon is None or tile_polygon.is_empty:
+                continue
+            if tile_polygon.area < input_spec.min_planar_region_area_mm2:
+                continue
+
+            tile_profile = PartProfile2D(
+                outline=tile_polygon,
+                material_key=part.profile.material_key,
+                thickness_mm=part.profile.thickness_mm,
+                basis_u=part.profile.basis_u,
+                basis_v=part.profile.basis_v,
+                origin_3d=part.profile.origin_3d,
+            )
+            result.append(
+                ManufacturingPart(
+                    part_id=f"{part.part_id}_tile_{r}_{c_idx}",
+                    material_key=part.material_key,
+                    thickness_mm=part.thickness_mm,
+                    profile=tile_profile,
+                    region_type=part.region_type,
+                    position_3d=part.position_3d.copy(),
+                    rotation_3d=part.rotation_3d.copy(),
+                    source_area_mm2=float(tile_polygon.area),
+                    source_faces=list(part.source_faces),
+                    bend_ops=[],
+                    metadata=dict(part.metadata),
+                )
+            )
+
+    return result if result else [part]

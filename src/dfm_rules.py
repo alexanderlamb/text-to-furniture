@@ -30,8 +30,8 @@ class DFMConfig:
     slip_fit_clearance_inch: float = 0.010  # per-side clearance for press fit
     min_bridge_width_inch: float = 0.125  # minimum remaining material
     max_aspect_ratio: float = 20.0  # length/width before warping risk
-    max_sheet_width_mm: float = 609.6  # 24" (plywood default)
-    max_sheet_height_mm: float = 762.0  # 30" (plywood default)
+    max_sheet_width_mm: float = 10000.0  # effectively unlimited
+    max_sheet_height_mm: float = 10000.0  # effectively unlimited
 
     @property
     def min_slot_width_mm(self) -> float:

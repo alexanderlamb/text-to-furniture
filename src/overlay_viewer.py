@@ -31,6 +31,21 @@ _PART_COLORS = [
     "#17becf",
 ]
 
+# Realistic material colors for rendering
+_MATERIAL_COLORS: Dict[str, Tuple[str, str]] = {
+    # (face_color, edge_color)
+    "plywood_baltic_birch": ("#D4B896", "#8B7355"),
+    "mdf": ("#C4A882", "#7A6B5D"),
+    "hardboard": ("#8B7355", "#5C4A32"),
+    "acrylic_clear": ("#E8F4FD", "#B0C4DE"),
+    "acrylic_black": ("#2D2D2D", "#1A1A1A"),
+    "aluminum_5052": ("#C0C0C0", "#808080"),
+    "steel_mild": ("#A8A8A8", "#696969"),
+    "steel_stainless_304": ("#D0D0D0", "#909090"),
+}
+
+_DEFAULT_MATERIAL_COLOR = ("#D4B896", "#8B7355")  # Baltic Birch default
+
 
 @dataclass
 class NormalizationParams:
@@ -46,6 +61,7 @@ class OverlayPart:
     fill_faces: np.ndarray
     edge_loops: List[np.ndarray]
     centroid: np.ndarray
+    edge_color: str = "#8B7355"
 
 
 @dataclass
@@ -116,19 +132,16 @@ def _load_mesh(mesh_path: Path) -> trimesh.Trimesh:
     return out
 
 
-def load_run_overlay_inputs(run_dir: str) -> Dict[str, Any]:
+def load_run_overlay_inputs(
+    run_dir: str,
+    design_json_override: Optional[str] = None,
+) -> Dict[str, Any]:
     run_path = Path(run_dir)
     manifest_path = run_path / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(f"Missing manifest: {manifest_path}")
 
     manifest = _read_json(manifest_path)
-    artifacts = manifest.get("artifacts", {})
-    design_json = artifacts.get("design_json")
-    if not design_json:
-        raise FileNotFoundError(
-            f"Manifest missing artifacts.design_json: {manifest_path}"
-        )
 
     mesh_candidate = str(manifest.get("input_mesh", "")).strip()
     if mesh_candidate:
@@ -139,10 +152,21 @@ def load_run_overlay_inputs(run_dir: str) -> Dict[str, Any]:
             raise FileNotFoundError(f"No input mesh found in {run_path / 'input'}")
         mesh_path = mesh_files[0]
 
-    design_path = _resolve_path(run_path, design_json)
+    if design_json_override:
+        design = _read_json(Path(design_json_override))
+    else:
+        artifacts = manifest.get("artifacts", {})
+        design_json = artifacts.get("design_json")
+        if not design_json:
+            raise FileNotFoundError(
+                f"Manifest missing artifacts.design_json: {manifest_path}"
+            )
+        design_path = _resolve_path(run_path, design_json)
+        design = _read_json(design_path)
+
     return {
         "manifest": manifest,
-        "design": _read_json(design_path),
+        "design": design,
         "mesh_path": mesh_path,
         "step3_input": _extract_step3_input(manifest),
     }
@@ -181,15 +205,10 @@ def normalized_to_original(
 
 
 def _rotation_matrix_xyz(rotation_xyz: Sequence[float]) -> np.ndarray:
-    rx, ry, rz = [float(v) for v in rotation_xyz]
-    cx, sx = np.cos(rx), np.sin(rx)
-    cy, sy = np.cos(ry), np.sin(ry)
-    cz, sz = np.cos(rz), np.sin(rz)
+    from scipy.spatial.transform import Rotation
 
-    rx_m = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=float)
-    ry_m = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=float)
-    rz_m = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=float)
-    return rz_m @ ry_m @ rx_m
+    rotvec = np.asarray(rotation_xyz, dtype=float)
+    return Rotation.from_rotvec(rotvec).as_matrix()
 
 
 def _clean_polygon(polygon: Polygon) -> Optional[Polygon]:
@@ -266,6 +285,75 @@ def _transform_local_points(
     return (rot @ local.T).T + pos
 
 
+def _transform_local_3d_points(
+    points_3d: np.ndarray, rotation_3d: Sequence[float], position_3d: Sequence[float]
+) -> np.ndarray:
+    if len(points_3d) == 0:
+        return np.zeros((0, 3), dtype=float)
+    rot = _rotation_matrix_xyz(rotation_3d)
+    pos = np.asarray(position_3d, dtype=float)
+    return (rot @ points_3d.T).T + pos
+
+
+def _extrude_triangulated_polygon(
+    verts_2d: np.ndarray,
+    faces_2d: np.ndarray,
+    edge_loops_2d: List[np.ndarray],
+    thickness_mm: float,
+) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
+    """Extrude a 2D triangulated polygon into a 3D slab in local coords.
+
+    Outer face at z=0 (mesh surface), inner face at z=-thickness_mm.
+    Returns (vertices_3d, faces, edge_loops_3d) in local coordinates.
+    """
+    n_fill = len(verts_2d)
+
+    # Outer and inner fill faces
+    outer_fill = np.column_stack([verts_2d, np.zeros(n_fill)])
+    inner_fill = np.column_stack([verts_2d, np.full(n_fill, -thickness_mm)])
+
+    all_verts: List[np.ndarray] = [outer_fill, inner_fill]
+    all_faces: List[np.ndarray] = [
+        faces_2d.copy(),
+        faces_2d[:, ::-1] + n_fill,  # reversed winding for inner face
+    ]
+
+    base_idx = 2 * n_fill
+
+    # Side walls from edge loops
+    for loop in edge_loops_2d:
+        n_loop = len(loop)
+        if n_loop < 2:
+            continue
+        outer_edge = np.column_stack([loop, np.zeros(n_loop)])
+        inner_edge = np.column_stack([loop, np.full(n_loop, -thickness_mm)])
+        all_verts.append(outer_edge)
+        all_verts.append(inner_edge)
+
+        side_tris = []
+        for k in range(n_loop):
+            k_next = (k + 1) % n_loop
+            o0 = base_idx + k
+            o1 = base_idx + k_next
+            i0 = base_idx + n_loop + k
+            i1 = base_idx + n_loop + k_next
+            side_tris.append([o0, o1, i0])
+            side_tris.append([i0, o1, i1])
+        all_faces.append(np.array(side_tris, dtype=int))
+        base_idx += 2 * n_loop
+
+    verts_out = np.vstack(all_verts) if all_verts else np.zeros((0, 3), dtype=float)
+    faces_out = np.vstack(all_faces) if all_faces else np.zeros((0, 3), dtype=int)
+
+    # Edge loops: outer and inner copy of each
+    loops_out: List[np.ndarray] = []
+    for loop in edge_loops_2d:
+        loops_out.append(np.column_stack([loop, np.zeros(len(loop))]))
+        loops_out.append(np.column_stack([loop, np.full(len(loop), -thickness_mm)]))
+
+    return verts_out, faces_out, loops_out
+
+
 def transform_part_outline_to_3d(
     outline_2d: Sequence[Sequence[float]],
     rotation_3d: Sequence[float],
@@ -311,11 +399,14 @@ def build_overlay_scene(
     run_dir: str,
     space: str = "original",
     max_mesh_faces: int = 8000,
+    design_json_override: Optional[str] = None,
 ) -> OverlaySceneData:
     if space not in {"original", "normalized"}:
         raise ValueError(f"Unsupported space: {space}")
 
-    payload = load_run_overlay_inputs(run_dir)
+    payload = load_run_overlay_inputs(
+        run_dir, design_json_override=design_json_override
+    )
     manifest = payload["manifest"]
     design = payload["design"]
     mesh_path: Path = payload["mesh_path"]
@@ -338,7 +429,15 @@ def build_overlay_scene(
         outline_2d = part_payload.get("outline_2d") or []
         cutouts_2d = part_payload.get("cutouts_2d") or []
         rotation_3d = part_payload.get("rotation_3d") or [0.0, 0.0, 0.0]
-        position_3d = part_payload.get("position_3d") or [0.0, 0.0, 0.0]
+        # Use origin_3d for outline placement (outline coords are relative to it).
+        # Fall back to position_3d for older data that doesn't have origin_3d.
+        position_3d = part_payload.get("origin_3d") or part_payload.get("position_3d") or [0.0, 0.0, 0.0]
+        thickness_mm = float(part_payload.get("thickness_mm", 0.0))
+        material_key = str(part_payload.get("material_key", ""))
+        face_color = _part_color(part_id)
+        _, edge_color = _MATERIAL_COLORS.get(
+            material_key, _DEFAULT_MATERIAL_COLOR
+        )
 
         verts_2d, faces_2d, edge_loops_2d = triangulate_part_polygon(
             outline_2d, cutouts_2d
@@ -347,12 +446,29 @@ def build_overlay_scene(
             warnings.append(f"Skipped part {part_id}: non-triangulable outline")
             continue
 
-        fill_vertices = _transform_local_points(verts_2d, rotation_3d, position_3d)
-        edge_loops = [
-            _transform_local_points(loop, rotation_3d, position_3d)
-            for loop in edge_loops_2d
-            if len(loop) >= 2
-        ]
+        if thickness_mm > 0:
+            # Extrude into 3D slab with material thickness
+            local_verts, local_faces, local_loops = _extrude_triangulated_polygon(
+                verts_2d, faces_2d, edge_loops_2d, thickness_mm
+            )
+            fill_vertices = _transform_local_3d_points(
+                local_verts, rotation_3d, position_3d
+            )
+            fill_faces = local_faces
+            edge_loops = [
+                _transform_local_3d_points(loop, rotation_3d, position_3d)
+                for loop in local_loops
+                if len(loop) >= 2
+            ]
+        else:
+            # Flat rendering fallback
+            fill_vertices = _transform_local_points(verts_2d, rotation_3d, position_3d)
+            fill_faces = faces_2d
+            edge_loops = [
+                _transform_local_points(loop, rotation_3d, position_3d)
+                for loop in edge_loops_2d
+                if len(loop) >= 2
+            ]
         if len(fill_vertices) == 0:
             warnings.append(f"Skipped part {part_id}: empty transformed geometry")
             continue
@@ -364,11 +480,12 @@ def build_overlay_scene(
         parts.append(
             OverlayPart(
                 part_id=part_id,
-                color=_part_color(part_id),
+                color=face_color,
                 fill_vertices=fill_vertices,
-                fill_faces=faces_2d,
+                fill_faces=fill_faces,
                 edge_loops=edge_loops,
                 centroid=centroid,
+                edge_color=edge_color,
             )
         )
 
@@ -441,7 +558,7 @@ def render_overlay_screenshot(
             if len(loop) == 0:
                 continue
             closed = loop if (loop[0] == loop[-1]).all() else np.vstack([loop, loop[0]])
-            ax.plot(closed[:, 0], closed[:, 1], closed[:, 2], color=part.color, linewidth=1.0)
+            ax.plot(closed[:, 0], closed[:, 1], closed[:, 2], color=part.edge_color, linewidth=1.0)
 
     if bounds:
         cloud = np.vstack(bounds)

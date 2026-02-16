@@ -119,9 +119,10 @@ def _plotly_figure(
                 showlegend=False, hoverinfo="skip",
             ))
     fig.update_layout(
-        scene={"aspectmode": "data"},
+        scene={"aspectmode": "data", "uirevision": "keep"},
         margin={"l": 10, "r": 10, "t": 30, "b": 10},
         legend={"orientation": "h"},
+        uirevision="keep",
     )
     return fig
 
@@ -223,6 +224,80 @@ def _render_overlay(run_dir: str, key: str) -> None:
         with st.expander("Overlay warnings"):
             for w in scene.warnings:
                 st.write(f"- {w}")
+
+
+# ---------------------------------------------------------------------------
+# Phase step-through debugger
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def _cached_snapshot_scene(
+    run_dir: str, snapshot_path: str, space: str, max_faces: int
+) -> OverlaySceneData:
+    return build_overlay_scene(
+        run_dir, space=space, max_mesh_faces=max_faces,
+        design_json_override=snapshot_path,
+    )
+
+
+def _render_phase_stepper(run_dir: str, key: str) -> None:
+    """Show a slider to step through pipeline phase snapshots."""
+    snapshots_dir = Path(run_dir) / "artifacts" / "snapshots"
+    if not snapshots_dir.is_dir():
+        return
+
+    snapshot_files = sorted(snapshots_dir.glob("phase_*.json"))
+    if not snapshot_files:
+        return
+
+    # Load metadata for slider labels
+    snapshot_meta = []
+    for sf in snapshot_files:
+        try:
+            meta = read_json(sf)
+            label = meta.get("phase_label", sf.stem)
+            count = meta.get("part_count", "?")
+            snapshot_meta.append((str(sf), label, count))
+        except Exception:
+            snapshot_meta.append((str(sf), sf.stem, "?"))
+
+    if len(snapshot_meta) < 2:
+        return
+
+    with st.expander("Phase Step-Through", expanded=False):
+        labels = [f"{i}: {label} ({count} parts)" for i, (_, label, count) in enumerate(snapshot_meta)]
+        selected_label = st.select_slider(
+            "Pipeline phase", options=labels, value=labels[-1], key=f"{key}-phase-sl",
+        )
+        selected_idx = labels.index(selected_label)
+        snapshot_path = snapshot_meta[selected_idx][0]
+
+        with st.container():
+            c1, c2, c3 = st.columns(3)
+            space_label = c1.selectbox("Space", ["Original", "Normalized"], index=0, key=f"{key}-ps-sp")
+            max_faces = c2.slider("Face cap", 2000, 40000, DEFAULT_MAX_MESH_FACES, 1000, key=f"{key}-ps-fc")
+            part_op = c3.slider("Part opacity", 0.05, 1.0, 0.55, 0.05, key=f"{key}-ps-po")
+
+        space = "original" if space_label == "Original" else "normalized"
+        try:
+            scene = _cached_snapshot_scene(run_dir, snapshot_path, space, max_faces)
+        except Exception as exc:
+            st.warning(f"Phase overlay unavailable: {exc}")
+            return
+
+        if not scene.parts:
+            st.info("No parts in this phase.")
+            return
+
+        all_ids = {p.part_id for p in scene.parts}
+        if go is not None:
+            fig = _plotly_figure(scene, all_ids, 0.30, part_op, True)
+            st.plotly_chart(fig, use_container_width=True, key=f"{key}-ps-fig")
+        else:
+            fig = _matplotlib_figure(scene, all_ids, 0.30, part_op, True)
+            st.pyplot(fig, clear_figure=True, use_container_width=True)
+
+        st.caption(f"Phase: {snapshot_meta[selected_idx][1]} | Parts: {len(scene.parts)}")
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +572,7 @@ def _render_suite_review(suites_dir: str) -> None:
         metrics = read_json(Path(run_dir) / "metrics.json")
         _render_metrics_row(metrics)
         _render_overlay(run_dir, key=f"sc-{case_idx}")
+        _render_phase_stepper(run_dir, key=f"sc-ps-{case_idx}")
         _render_violations(metrics)
         with st.expander("SVG / Artifacts"):
             _render_artifacts(run_dir, key=f"sa-{case_idx}")
@@ -562,6 +638,7 @@ def _render_run_detail(runs_dir: str) -> None:
     st.subheader(f"Run: {run['run_id']}")
     _render_metrics_row(metrics)
     _render_overlay(run_dir, key=f"rd-{run_idx}")
+    _render_phase_stepper(run_dir, key=f"rd-ps-{run_idx}")
     _render_violations(metrics)
     with st.expander("SVG / Artifacts"):
         _render_artifacts(run_dir, key=f"ra-{run_idx}")

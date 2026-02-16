@@ -82,6 +82,16 @@ def run_pipeline_from_mesh(
     design_json_path = paths.artifacts_dir / "design_first_principles.json"
     write_json(design_json_path, step3.to_manufacturing_json())
 
+    # Write phase snapshots for step-through debugging
+    phase_snapshots = step3.debug.get("phase_snapshots", [])
+    if phase_snapshots:
+        snapshots_dir = paths.artifacts_dir / "snapshots"
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+        for snap in phase_snapshots:
+            label_slug = snap["phase_label"].lower().replace(" ", "_").replace("(", "").replace(")", "")
+            fname = f"phase_{snap['phase_index']:02d}_{label_slug}.json"
+            write_json(snapshots_dir / fname, snap)
+
     svg_paths: List[str] = []
     nested_svg_path = None
     if config.export_svg:
@@ -117,7 +127,7 @@ def run_pipeline_from_mesh(
         "elapsed_s": round(elapsed, 3),
         "quality_metrics": asdict(step3.quality_metrics),
         "violations": [asdict(v) for v in step3.violations],
-        "debug": dict(step3.debug),
+        "debug": {k: v for k, v in step3.debug.items() if k != "phase_snapshots"},
         "counts": {
             "components": len(design.components),
             "joints": len(design.assembly.joints),

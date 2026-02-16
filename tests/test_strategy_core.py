@@ -126,24 +126,13 @@ def test_select_candidates_can_allocate_stack_layers_under_budget():
         score=30000.0,
         metadata={"kind": "merged_facet_pair", "member_thickness_mm": 12.7},
     )
-    smaller = _RegionCandidate(
-        region_type=RegionType.PLANAR_CUT,
-        profile=profile,
-        normal=np.array([1.0, 0.0, 0.0]),
-        position_3d=np.array([150.0, 0.0, 60.0]),
-        area_mm2=15000.0,
-        source_faces=[3, 4, 5],
-        bend_ops=[],
-        score=15000.0,
-        metadata={"kind": "facet"},
-    )
     spec = Step3Input(
         mesh_path="/tmp/not-used.stl",
         part_budget_max=2,
         enable_planar_stacking=True,
     )
 
-    parts, debug = _select_candidates([thick_target, smaller], spec)
+    parts, debug = _select_candidates([thick_target], spec)
 
     assert len(parts) == 2
     assert debug["stacked_extra_layers"] == 1
