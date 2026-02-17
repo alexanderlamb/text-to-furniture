@@ -2527,7 +2527,112 @@ def _trim_loss_fraction(
 
 
 _SIGNIFICANT_TRIM_THRESHOLD = 0.20  # 20 % area loss
-_NEAR_ZERO_TRIM = 1e-4  # Below this, a trim removes no meaningful area
+_MIN_SHARED_BOUNDARY_MM = 1.0  # Skip pairs with < 1mm shared intersection
+
+
+def _line_outline_segment(
+    part: ManufacturingPart,
+    line_point: np.ndarray,
+    line_dir: np.ndarray,
+) -> Optional[Tuple[float, float]]:
+    """Return (t_min, t_max) where 3D line passes through part's outline.
+
+    The line is parameterised as P(t) = line_point + t * line_dir.  We project
+    it into the part's 2D frame and intersect with the outline polygon.
+    The outline is buffered by the part's material thickness so that parts
+    meeting at their edges (within one thickness distance) still register a
+    shared boundary.
+    Returns None if the line doesn't cross the outline.
+    """
+    profile = part.profile
+    if profile.basis_u is None or profile.basis_v is None or profile.origin_3d is None:
+        return None
+
+    delta = line_point - profile.origin_3d
+    u0 = float(np.dot(profile.basis_u, delta))
+    v0 = float(np.dot(profile.basis_v, delta))
+    du = float(np.dot(profile.basis_u, line_dir))
+    dv = float(np.dot(profile.basis_v, line_dir))
+
+    if abs(du) < 1e-12 and abs(dv) < 1e-12:
+        return None  # Line perpendicular to this part's plane
+
+    T = 10000.0
+    line_2d = LineString([
+        (u0 - T * du, v0 - T * dv),
+        (u0 + T * du, v0 + T * dv),
+    ])
+
+    # Buffer by material thickness so edges meeting within one thickness
+    # distance still count as sharing a boundary.
+    check_outline = profile.outline.buffer(part.thickness_mm, quad_segs=2)
+
+    try:
+        inter = line_2d.intersection(check_outline)
+    except Exception:
+        return None
+
+    if inter.is_empty:
+        return None
+
+    # Collect all coordinates from the intersection geometry
+    coords: list = []
+    if inter.geom_type == "LineString":
+        coords = list(inter.coords)
+    elif inter.geom_type == "MultiLineString":
+        for ls in inter.geoms:
+            coords.extend(list(ls.coords))
+    elif inter.geom_type == "GeometryCollection":
+        for g in inter.geoms:
+            if g.geom_type == "LineString":
+                coords.extend(list(g.coords))
+    if len(coords) < 2:
+        return None
+
+    # Convert 2D coords back to t-parameter along the 3D line
+    use_u = abs(du) > abs(dv)
+    t_values = []
+    for u, v in coords:
+        t = (u - u0) / du if use_u else (v - v0) / dv
+        t_values.append(t)
+
+    return (min(t_values), max(t_values))
+
+
+def _shared_boundary_length(
+    pi: ManufacturingPart,
+    pj: ManufacturingPart,
+    n_i: np.ndarray,
+    n_j: np.ndarray,
+) -> float:
+    """Length (mm) of the plane-plane intersection line through BOTH outlines.
+
+    Two parts only need trim resolution if their planes' intersection line
+    passes through both finite outlines simultaneously — i.e. they share a
+    physical boundary.  If the intersection line misses one outline, the
+    infinite-plane trim is a phantom with no real material conflict.
+    """
+    L = np.cross(n_i, n_j)
+    L_norm = float(np.linalg.norm(L))
+    if L_norm < 1e-8:
+        return 0.0
+    L = L / L_norm
+
+    # A point on the intersection line (least-squares solution)
+    d_i = float(np.dot(n_i, pi.profile.origin_3d))
+    d_j = float(np.dot(n_j, pj.profile.origin_3d))
+    A = np.vstack([n_i, n_j])
+    P0 = np.linalg.lstsq(A, np.array([d_i, d_j]), rcond=None)[0]
+
+    seg_i = _line_outline_segment(pi, P0, L)
+    seg_j = _line_outline_segment(pj, P0, L)
+
+    if seg_i is None or seg_j is None:
+        return 0.0
+
+    overlap_start = max(seg_i[0], seg_j[0])
+    overlap_end = min(seg_i[1], seg_j[1])
+    return max(0.0, overlap_end - overlap_start)
 
 
 def _group_pairs_by_stack(
@@ -2555,11 +2660,16 @@ def _trim_at_plane_intersections(
 ) -> List[ManufacturingPart]:
     """Trim part outlines at plane-plane intersection boundaries.
 
-    Pairs are classified as *significant* (either direction removes >20% of a
-    part's area) or *minor* (small corner clips / butt joints).  Minor pairs
-    use largest-area-wins directly.  Significant pairs are grouped by stack
+    A shared-boundary gate checks whether the plane-plane intersection line
+    passes through both finite outlines; pairs with no shared boundary are
+    skipped (the infinite-plane trim would be a phantom with no material
+    conflict).
+
+    Surviving pairs are classified as *significant* (either direction removes
+    >20 % of a part's area) or *minor* (small corner clips / butt joints).
+    Minor pairs use lowest-loss-wins.  Significant pairs are grouped by stack
     membership (stacked siblings share one decision bit) and searched
-    exhaustively over the group mask to maximize total outline area.
+    exhaustively over the group mask to maximise total outline area.
     """
     # -- Collect intersecting pairs and classify --
     minor_pairs: List[Tuple[int, int, float, float]] = []  # (i, j, loss_i, loss_j)
@@ -2582,6 +2692,12 @@ def _trim_at_plane_intersections(
             if cross_norm < 0.1:
                 continue
 
+            # Volume gate: only trim if the plane-plane intersection line
+            # passes through both finite outlines (shared physical boundary).
+            shared = _shared_boundary_length(pi, pj, n_i, n_j)
+            if shared < _MIN_SHARED_BOUNDARY_MM:
+                continue
+
             # Trial-trim both directions to measure area loss
             loss_j = _trim_loss_fraction(pj, n_i, pi.profile.origin_3d, pi.thickness_mm)
             loss_i = _trim_loss_fraction(pi, n_j, pj.profile.origin_3d, pj.thickness_mm)
@@ -2598,20 +2714,10 @@ def _trim_at_plane_intersections(
     # The part with lower trim loss has the intersection line closer to its edge,
     # meaning it barely extends past the other part. Trim it so the continuing
     # part keeps its full extent.  Tie-break on area (larger area wins).
-    #
-    # ONE_ZERO fix: when one loss is ~0 (cutting plane doesn't intersect the
-    # outline), trimming that part is a no-op.  Always trim the non-zero part
-    # instead — it's the one actually extending past the boundary.
     minor_groups = [[(i, j)] for i, j, _, _ in minor_pairs]
     minor_mask = 0
     for k, (i, j, loss_i, loss_j) in enumerate(minor_pairs):
-        if loss_j < _NEAR_ZERO_TRIM and loss_i >= _NEAR_ZERO_TRIM:
-            # Trimming j is a no-op; i actually crosses → trim i
-            minor_mask |= 1 << k
-        elif loss_i < _NEAR_ZERO_TRIM and loss_j >= _NEAR_ZERO_TRIM:
-            # Trimming i is a no-op; j actually crosses → trim j (bit stays 0)
-            pass
-        elif loss_i < loss_j:
+        if loss_i < loss_j:
             # Part i loses less → i is more at its end → trim i
             minor_mask |= 1 << k
         elif loss_i == loss_j:
