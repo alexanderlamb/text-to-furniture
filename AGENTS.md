@@ -35,3 +35,34 @@ Short, descriptive subjects. Single-purpose commits with clear scope.
 ## Security
 
 Never commit secrets (`.env`). Keep API keys in environment variables. Generated run data goes to `runs/` which is gitignored.
+
+## Debug Artifacts (For Coding Agents)
+
+Use these outputs when debugging pipeline behavior:
+
+1. `runs/<run_id>/metrics.json`
+2. `runs/<run_id>/artifacts/debug_trace.json`
+3. `runs/<run_id>/artifacts/snapshots/phase_*.json`
+4. `runs/<run_id>/artifacts/design_first_principles.json`
+5. `runs/suites/<suite_run_id>/results.csv`
+
+Primary tracked diagnostics:
+
+- Final overlap: `debug.plane_overlap_*`, `debug.plane_overlap_details`, `debug.plane_overlap_regions`
+- Step 2 overlap: `debug.step2_plane_overlap_*`, `debug.step2_plane_overlap_details`, `debug.step2_plane_overlap_regions`
+- Step 2 trim logic: `debug.step2_trim_debug`
+- Intersection filter reasoning: `debug.intersection_events`, `debug.intersection_part_decisions`, `debug.intersection_reindex_map`
+- Phase-level diagnostics: `debug_trace.json -> phase_diagnostics[*].diagnostics`
+
+Suite CSV includes aggregate fields for quick triage:
+
+- `plane_overlap_pairs`
+- `plane_overlap_region_count`
+- `plane_overlap_total_mm`
+- `step2_plane_overlap_pairs`
+- `step2_plane_overlap_region_count`
+- `step2_trim_search_mode`
+- `step2_trim_minor_pairs_count`
+- `step2_trim_significant_pairs_count`
+
+Detailed schema and examples live in `notes/debug_artifacts.md`.

@@ -8,14 +8,14 @@ import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import trimesh
-from shapely.geometry import LineString, MultiPoint, MultiPolygon, Polygon, box
+from shapely.geometry import LineString, MultiPoint, MultiPolygon, Point, Polygon, box
 from shapely.ops import unary_union
 
-from dfm_rules import DFMConfig, DFMViolation, check_part_dfm
+from dfm_rules import DFMConfig, DFMViolation, add_dogbone_relief, check_part_dfm
 from furniture import (
     Component,
     ComponentType,
@@ -86,8 +86,6 @@ class Step3Input:
     joint_distance_mm: float = 240.0
     joint_contact_tolerance_mm: float = 2.0
     joint_parallel_dot_threshold: float = 0.95
-    seam_weight: float = 0.15
-    assembly_weight: float = 0.10
     enable_planar_stacking: bool = True
     max_stack_layers_per_region: int = 4
     stack_roundup_bias: float = 0.35
@@ -101,6 +99,11 @@ class Step3Input:
     allow_joint_intent_intersections: bool = True
     intersection_clearance_mm: float = 0.5
     mesh_clip_min_area_ratio: float = 0.25
+    joint_enable_geometry: bool = True
+    joint_tab_spacing_mm: float = 80.0
+    joint_tab_length_mm: float = 20.0
+    joint_min_contact_mm: float = 15.0
+    joint_fit_validation: bool = True  # enable joint fit + assembly checks
 
 
 @dataclass
@@ -150,8 +153,9 @@ class Step3QualityMetrics:
     hausdorff_mm: float
     mean_distance_mm: float
     normal_error_deg: float
-    seam_penalty: float
-    assembly_penalty: float
+    connectivity_score: float
+    overlap_score: float
+    violation_score: float
     part_count: int
     overall_score: float
 
@@ -178,9 +182,8 @@ class Step3Output:
                     "outline_2d": list(part.profile.outline.exterior.coords),
                     "cutouts_2d": [
                         list(c.exterior.coords) for c in part.profile.cutouts
-                    ] + [
-                        list(h.coords) for h in part.profile.outline.interiors
-                    ],
+                    ]
+                    + [list(h.coords) for h in part.profile.outline.interiors],
                     "bend_ops": [
                         {
                             "line": [list(op.line[0]), list(op.line[1])],
@@ -219,8 +222,9 @@ class Step3Output:
                 "hausdorff_mm": self.quality_metrics.hausdorff_mm,
                 "mean_distance_mm": self.quality_metrics.mean_distance_mm,
                 "normal_error_deg": self.quality_metrics.normal_error_deg,
-                "seam_penalty": self.quality_metrics.seam_penalty,
-                "assembly_penalty": self.quality_metrics.assembly_penalty,
+                "connectivity_score": self.quality_metrics.connectivity_score,
+                "overlap_score": self.quality_metrics.overlap_score,
+                "violation_score": self.quality_metrics.violation_score,
                 "part_count": self.quality_metrics.part_count,
                 "overall_score": self.quality_metrics.overall_score,
             },
@@ -242,6 +246,7 @@ def _serialize_parts_snapshot(
     index: int,
     parts: List[ManufacturingPart],
     joints: Optional[List[JointSpec]] = None,
+    diagnostics: Optional[Dict[str, object]] = None,
 ) -> dict:
     """Serialize current parts state for phase step-through debugging."""
     parts_payload = []
@@ -253,11 +258,8 @@ def _serialize_parts_snapshot(
                 "material_key": part.material_key,
                 "thickness_mm": part.thickness_mm,
                 "outline_2d": list(part.profile.outline.exterior.coords),
-                "cutouts_2d": [
-                    list(c.exterior.coords) for c in part.profile.cutouts
-                ] + [
-                    list(h.coords) for h in part.profile.outline.interiors
-                ],
+                "cutouts_2d": [list(c.exterior.coords) for c in part.profile.cutouts]
+                + [list(h.coords) for h in part.profile.outline.interiors],
                 "bend_ops": [
                     {
                         "line": [list(op.line[0]), list(op.line[1])],
@@ -269,16 +271,18 @@ def _serialize_parts_snapshot(
                     for op in part.bend_ops
                 ],
                 "position_3d": [float(v) for v in part.position_3d],
-                "origin_3d": [
-                    float(v)
-                    for v in (
-                        part.profile.origin_3d
-                        + part.metadata.get("stack_layer_offset_mm", 0.0)
-                        * _rotation_to_normal(part.rotation_3d)
-                    )
-                ]
-                if part.profile.origin_3d is not None
-                else [float(v) for v in part.position_3d],
+                "origin_3d": (
+                    [
+                        float(v)
+                        for v in (
+                            part.profile.origin_3d
+                            + part.metadata.get("stack_layer_offset_mm", 0.0)
+                            * _rotation_to_normal(part.rotation_3d)
+                        )
+                    ]
+                    if part.profile.origin_3d is not None
+                    else [float(v) for v in part.position_3d]
+                ),
                 "rotation_3d": [float(v) for v in part.rotation_3d],
                 "source_area_mm2": float(part.source_area_mm2),
                 "metadata": part.metadata,
@@ -299,7 +303,7 @@ def _serialize_parts_snapshot(
             for j in joints
         ]
 
-    return {
+    payload = {
         "phase_label": label,
         "phase_index": index,
         "part_count": len(parts_payload),
@@ -307,6 +311,65 @@ def _serialize_parts_snapshot(
         "parts": parts_payload,
         "joints": joints_payload,
     }
+    if diagnostics:
+        payload["diagnostics"] = diagnostics
+    return payload
+
+
+def _extract_phase_overlap_metrics(
+    phase_snapshots: List[dict],
+    phase_index: int,
+    prefix: str,
+) -> Dict[str, object]:
+    """Extract overlap metrics from a snapshot diagnostics payload."""
+    defaults: Dict[str, object] = {
+        f"{prefix}pairs": 0,
+        f"{prefix}max_mm": 0.0,
+        f"{prefix}total_mm": 0.0,
+        f"{prefix}count": 0,
+        f"{prefix}details": [],
+        f"{prefix}regions": [],
+    }
+    for snap in phase_snapshots:
+        if int(snap.get("phase_index", -1)) != int(phase_index):
+            continue
+        diagnostics = snap.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return defaults
+        overlap = diagnostics.get("plane_overlap")
+        if not isinstance(overlap, dict):
+            return defaults
+        return {
+            f"{prefix}pairs": int(overlap.get("plane_overlap_pairs", 0) or 0),
+            f"{prefix}max_mm": float(overlap.get("plane_overlap_max_mm", 0.0) or 0.0),
+            f"{prefix}total_mm": float(
+                overlap.get("plane_overlap_total_mm", 0.0) or 0.0
+            ),
+            f"{prefix}count": int(overlap.get("plane_overlap_count", 0) or 0),
+            f"{prefix}details": overlap.get("plane_overlap_details", []),
+            f"{prefix}regions": overlap.get("plane_overlap_regions", []),
+        }
+    return defaults
+
+
+def _extract_phase_trim_debug(
+    phase_snapshots: List[dict], phase_index: int
+) -> Dict[str, Any]:
+    """Extract trim-decision diagnostics from a phase snapshot."""
+    defaults: Dict[str, Any] = {
+        "step2_trim_debug": {},
+    }
+    for snap in phase_snapshots:
+        if int(snap.get("phase_index", -1)) != int(phase_index):
+            continue
+        diagnostics = snap.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return defaults
+        trim_debug = diagnostics.get("trim_decisions")
+        if isinstance(trim_debug, dict):
+            return {"step2_trim_debug": trim_debug}
+        return defaults
+    return defaults
 
 
 @dataclass
@@ -373,7 +436,9 @@ def decompose_first_principles(input_spec: Step3Input) -> Step3Output:
         input_spec=input_spec,
     )
     coplanar_grouped = _merge_coplanar_candidates(raw_candidates, mesh)
-    candidates, merged_planar_pairs = _collapse_planar_face_pairs(coplanar_grouped)
+    candidates, merged_planar_pairs = _collapse_planar_face_pairs(
+        coplanar_grouped, mesh=mesh
+    )
     timers["candidate_generation_s"] = time.perf_counter() - t1
 
     if not candidates:
@@ -386,20 +451,65 @@ def decompose_first_principles(input_spec: Step3Input) -> Step3Output:
     t2 = time.perf_counter()
     selected_parts, selection_debug = _select_candidates(candidates, input_spec)
     phase_snapshots = [
-        _serialize_parts_snapshot("Selected parts", 0, selected_parts),
+        _serialize_parts_snapshot(
+            "Selected parts",
+            0,
+            selected_parts,
+            diagnostics=_phase_diagnostics(selected_parts),
+        ),
     ]
+    # Identify joint contact pairs BEFORE trimming so the trimmer can
+    # make informed decisions about which direction to cut.
+    joint_contact_pairs = _identify_joint_contact_pairs(
+        selected_parts,
+        contact_tolerance_mm=input_spec.joint_contact_tolerance_mm,
+        parallel_dot_threshold=input_spec.joint_parallel_dot_threshold,
+        joint_distance_mm=input_spec.joint_distance_mm,
+    )
     selected_parts, constrain_snapshots = _constrain_outlines(
-        selected_parts, mesh, input_spec
+        selected_parts, mesh, input_spec, joint_pairs=joint_contact_pairs
     )
     phase_snapshots.extend(constrain_snapshots)
+    # Do NOT pass contact_pairs here — part indices are invalidated by
+    # _constrain_outlines (which deep-copies, drops, and reorders parts).
+    # Let _synthesize_joint_specs do its own full scan on the final parts.
     joints = _synthesize_joint_specs(
         selected_parts,
         joint_distance_mm=input_spec.joint_distance_mm,
         contact_tolerance_mm=input_spec.joint_contact_tolerance_mm,
         parallel_dot_threshold=input_spec.joint_parallel_dot_threshold,
     )
+    selected_parts, joints, joint_geom_debug = _apply_joint_geometry(
+        selected_parts, joints, input_spec
+    )
+    # Safety-net: bounded post-joint cleanup for residual overlaps after
+    # joint geometry application. Should rarely trigger with correct trim.
+    selected_parts = _post_joint_overlap_cleanup(
+        selected_parts, joints
+    )
     phase_snapshots.append(
-        _serialize_parts_snapshot("With joints", 5, selected_parts, joints)
+        _serialize_parts_snapshot(
+            "With joint geometry",
+            5,
+            selected_parts,
+            joints,
+            diagnostics=_phase_diagnostics(
+                selected_parts,
+                joint_count=int(len(joints)),
+            ),
+        )
+    )
+    phase_snapshots.append(
+        _serialize_parts_snapshot(
+            "With joints",
+            6,
+            selected_parts,
+            joints,
+            diagnostics=_phase_diagnostics(
+                selected_parts,
+                joint_count=int(len(joints)),
+            ),
+        )
     )
     design = _build_design(input_spec.design_name, selected_parts, joints, material_key)
     timers["selection_and_assembly_s"] = time.perf_counter() - t2
@@ -425,14 +535,35 @@ def decompose_first_principles(input_spec: Step3Input) -> Step3Output:
     else:
         unsupported_fraction = 0.0
 
+    if input_spec.joint_fit_validation:
+        joint_fit_violations, joint_fit_debug = _validate_joint_fit_2d(
+            selected_parts, joints
+        )
+        violations.extend(joint_fit_violations)
+
+        assembly_violations, assembly_debug = _validate_joint_assembly_3d(
+            selected_parts, joints
+        )
+        violations.extend(assembly_violations)
+    else:
+        joint_fit_debug = {}
+        assembly_debug = {}
+
+    overlap_debug = _compute_plane_overlap(selected_parts, joints=joints)
+    step2_overlap_debug = _extract_phase_overlap_metrics(
+        phase_snapshots, phase_index=2, prefix="step2_plane_overlap_"
+    )
+    step2_trim_debug = _extract_phase_trim_debug(phase_snapshots, phase_index=2)
+
+    error_count = sum(1 for v in violations if v.severity == "error")
     quality = _compute_quality_metrics(
         mesh=mesh,
         selected_parts=selected_parts,
         joints=joints,
         part_budget_max=input_spec.part_budget_max,
         fidelity_weight=input_spec.fidelity_weight,
-        seam_weight=input_spec.seam_weight,
-        assembly_weight=input_spec.assembly_weight,
+        overlap_pairs=int(overlap_debug.get("plane_overlap_pairs", 0)),
+        error_count=error_count,
     )
     timers["validation_metrics_s"] = time.perf_counter() - t3
 
@@ -460,6 +591,12 @@ def decompose_first_principles(input_spec: Step3Input) -> Step3Output:
         "timings": timers,
         "phase_snapshots": phase_snapshots,
         **selection_debug,
+        **joint_geom_debug,
+        **joint_fit_debug,
+        **assembly_debug,
+        **overlap_debug,
+        **step2_overlap_debug,
+        **step2_trim_debug,
     }
     design.metadata["step3_first_principles"] = debug
 
@@ -916,10 +1053,38 @@ def _is_opposite_planar_pair(a: _RegionCandidate, b: _RegionCandidate) -> bool:
     return True
 
 
+def _classify_face_exterior(
+    mesh: trimesh.Trimesh,
+    face_centroid: np.ndarray,
+    face_normal: np.ndarray,
+    epsilon: float = 0.5,
+) -> bool:
+    """Return True if *face_normal* points into open space (exterior face).
+
+    Casts a ray from ``centroid + epsilon * normal`` along ``normal``.
+    If the ray hits nothing, the face looks outward (exterior).
+    Relies on ``mesh.fix_normals()`` having been called so that face normals
+    point outward.
+    """
+    n = face_normal / max(float(np.linalg.norm(face_normal)), 1e-12)
+    origin = np.asarray(face_centroid, dtype=float) + epsilon * n
+    try:
+        locations, _ray_idx, _tri_idx = mesh.ray.intersects_location(
+            ray_origins=origin.reshape(1, 3),
+            ray_directions=n.reshape(1, 3),
+        )
+        return len(locations) == 0
+    except Exception:
+        return False
+
+
 def _merge_planar_pair(
     a: _RegionCandidate,
     b: _RegionCandidate,
     member_thickness_mm: float,
+    stack_alignment: str = "centered",
+    exterior_face_origin_3d: Optional[np.ndarray] = None,
+    exterior_face_normal: Optional[np.ndarray] = None,
 ) -> _RegionCandidate:
     chosen = a if a.area_mm2 >= b.area_mm2 else b
     merged_faces = sorted(set(a.source_faces) | set(b.source_faces))
@@ -927,6 +1092,15 @@ def _merge_planar_pair(
     merged_metadata["kind"] = "merged_facet_pair"
     merged_metadata["merged_source_face_count"] = int(len(merged_faces))
     merged_metadata["member_thickness_mm"] = float(max(0.0, member_thickness_mm))
+    merged_metadata["stack_alignment"] = stack_alignment
+    if exterior_face_origin_3d is not None:
+        merged_metadata["exterior_face_origin_3d"] = [
+            float(v) for v in exterior_face_origin_3d
+        ]
+    if exterior_face_normal is not None:
+        merged_metadata["exterior_face_normal"] = [
+            float(v) for v in exterior_face_normal
+        ]
 
     return _RegionCandidate(
         region_type=RegionType.PLANAR_CUT,
@@ -1057,6 +1231,7 @@ def _merge_coplanar_candidates(
 
 def _collapse_planar_face_pairs(
     candidates: List[_RegionCandidate],
+    mesh: Optional[trimesh.Trimesh] = None,
 ) -> Tuple[List[_RegionCandidate], int]:
     planar_indices = [
         idx
@@ -1097,8 +1272,43 @@ def _collapse_planar_face_pairs(
         if best_j is not None:
             used.add(i)
             used.add(best_j)
+            b = candidates[best_j]
+
+            # Classify faces as exterior/interior for stack alignment
+            stack_alignment = "centered"
+            exterior_face_origin_3d = None
+            exterior_face_normal = None
+            if mesh is not None:
+                a_ext = _classify_face_exterior(mesh, a.position_3d, a.normal)
+                b_ext = _classify_face_exterior(mesh, b.position_3d, b.normal)
+                if a_ext and not b_ext:
+                    stack_alignment = "exterior_flush"
+                    exterior_face_origin_3d = np.asarray(
+                        a.origin_3d if a.origin_3d is not None else a.position_3d,
+                        dtype=float,
+                    )
+                    exterior_face_normal = a.normal / max(
+                        float(np.linalg.norm(a.normal)), 1e-12
+                    )
+                elif b_ext and not a_ext:
+                    stack_alignment = "exterior_flush"
+                    exterior_face_origin_3d = np.asarray(
+                        b.origin_3d if b.origin_3d is not None else b.position_3d,
+                        dtype=float,
+                    )
+                    exterior_face_normal = b.normal / max(
+                        float(np.linalg.norm(b.normal)), 1e-12
+                    )
+
             planar_out.append(
-                _merge_planar_pair(a, candidates[best_j], member_thickness_mm=best_delta_n)
+                _merge_planar_pair(
+                    a,
+                    b,
+                    member_thickness_mm=best_delta_n,
+                    stack_alignment=stack_alignment,
+                    exterior_face_origin_3d=exterior_face_origin_3d,
+                    exterior_face_normal=exterior_face_normal,
+                )
             )
             merged_pairs += 1
         else:
@@ -1119,7 +1329,9 @@ def _select_candidates(
         return [], {"stack_enabled": bool(input_spec.enable_planar_stacking)}
 
     extra_layer_gain = float(np.clip(input_spec.stack_extra_layer_gain, 0.0, 1.5))
-    layer_options: List[Tuple[float, float, int, int]] = []  # (sort_gain, gain, rank, cand_idx)
+    layer_options: List[Tuple[float, float, int, int]] = (
+        []
+    )  # (sort_gain, gain, rank, cand_idx)
     target_layers_by_candidate: Dict[int, int] = {}
     member_thickness_by_candidate: Dict[int, float] = {}
     score_factor_by_candidate: Dict[int, float] = {}
@@ -1212,14 +1424,75 @@ def _select_candidates(
         cand = candidates[cand_idx]
         normal = cand.normal / max(np.linalg.norm(cand.normal), 1e-8)
         member_thickness = member_thickness_by_candidate.get(cand_idx)
-        offsets = _stack_layer_offsets_mm(
-            selected_layers,
-            sheet_thickness_mm=float(cand.profile.thickness_mm),
-            member_thickness_mm=member_thickness,
+        sheet_thick = float(cand.profile.thickness_mm)
+
+        # Determine stack alignment mode from merged-pair metadata
+        cand_alignment = cand.metadata.get("stack_alignment", "centered")
+        ext_origin_raw = cand.metadata.get("exterior_face_origin_3d")
+        ext_normal_raw = cand.metadata.get("exterior_face_normal")
+        use_exterior_flush = (
+            cand_alignment == "exterior_flush"
+            and ext_origin_raw is not None
+            and ext_normal_raw is not None
         )
+
+        if use_exterior_flush:
+            # Exterior-flush: place outermost sheet flush with exterior face,
+            # stack inward along the *opposite* of the exterior normal.
+            ext_origin = np.asarray(ext_origin_raw, dtype=float)
+            ext_normal = np.asarray(ext_normal_raw, dtype=float)
+            ext_normal = ext_normal / max(float(np.linalg.norm(ext_normal)), 1e-12)
+            # Sheet k center = ext_origin - (k + 0.5) * sheet_thick * ext_normal
+            # Clamp so sheet center stays within member thickness from exterior
+            max_inward = (
+                float(member_thickness) - 0.5 * sheet_thick
+                if member_thickness is not None and member_thickness > 1e-6
+                else float("inf")
+            )
+            sheet_centers = []
+            for k in range(selected_layers):
+                inward_dist = (k + 0.5) * sheet_thick
+                inward_dist = min(inward_dist, max_inward)
+                center = ext_origin - inward_dist * ext_normal
+                sheet_centers.append(center)
+        else:
+            # Centered mode: use symmetric offsets.
+            # For merged pairs where member_thickness is comparable to the total
+            # stack height, center at position_3d (midpoint between faces).
+            # When member_thickness is much larger (faces span the whole mesh),
+            # keep origin_3d as anchor since the midpoint is in empty space.
+            stack_height = selected_layers * sheet_thick
+            use_midpoint = (
+                cand.metadata.get("kind") == "merged_facet_pair"
+                and member_thickness is not None
+                and member_thickness > 1e-6
+                and stack_height >= 0.5 * member_thickness
+            )
+            if use_midpoint:
+                center_anchor = np.asarray(cand.position_3d, dtype=float)
+            else:
+                center_anchor = (
+                    np.asarray(cand.origin_3d, dtype=float)
+                    if cand.origin_3d is not None
+                    else np.asarray(cand.position_3d, dtype=float)
+                )
+            offsets = _stack_layer_offsets_mm(
+                selected_layers,
+                sheet_thickness_mm=sheet_thick,
+                member_thickness_mm=member_thickness,
+            )
+            sheet_centers = [center_anchor + off * normal for off in offsets]
+
         stack_group_id = f"cand_{cand_idx:04d}"
 
-        for layer_idx, offset in enumerate(offsets):
+        # profile_origin for computing stack_layer_offset_mm
+        profile_origin = (
+            np.asarray(cand.origin_3d, dtype=float)
+            if cand.origin_3d is not None
+            else np.asarray(cand.position_3d, dtype=float)
+        )
+
+        for layer_idx, sheet_center in enumerate(sheet_centers):
             part_id = f"part_{part_counter:02d}"
             part_counter += 1
             metadata = dict(cand.metadata)
@@ -1229,7 +1502,10 @@ def _select_candidates(
             metadata["stack_layer_index"] = int(layer_idx + 1)
             metadata["stack_layer_count"] = int(selected_layers)
             metadata["stack_target_layers"] = int(target_layers_by_candidate[cand_idx])
-            metadata["stack_layer_offset_mm"] = float(offset)
+            # Compute offset as dot(sheet_center - profile_origin, normal) so the
+            # serialization formula origin_3d + offset * normal still works.
+            layer_offset = float(np.dot(sheet_center - profile_origin, normal))
+            metadata["stack_layer_offset_mm"] = layer_offset
             metadata["candidate_outline_area_mm2"] = outline_area_mm2
             metadata["candidate_source_area_mm2"] = source_area_mm2
             metadata["mesh_constraint_pressure"] = _candidate_mesh_constraint_pressure(
@@ -1248,14 +1524,6 @@ def _select_candidates(
                 base_gain *= extra_layer_gain * (0.85 ** (layer_idx - 1))
             metadata["selection_gain"] = float(base_gain * score_factor)
 
-            # outline_2d is defined in the candidate's local plane frame.
-            # Use the same frame anchor (origin_3d) for position_3d when available.
-            base_anchor = (
-                np.asarray(cand.origin_3d, dtype=float)
-                if cand.origin_3d is not None
-                else np.asarray(cand.position_3d, dtype=float)
-            )
-
             parts.append(
                 ManufacturingPart(
                     part_id=part_id,
@@ -1263,7 +1531,7 @@ def _select_candidates(
                     thickness_mm=cand.profile.thickness_mm,
                     profile=cand.profile,
                     region_type=cand.region_type,
-                    position_3d=base_anchor + offset * normal,
+                    position_3d=sheet_center,
                     rotation_3d=_normal_to_rotation(cand.normal),
                     source_area_mm2=cand.area_mm2,
                     source_faces=list(cand.source_faces),
@@ -1425,7 +1693,9 @@ def _stack_layer_offsets_mm(
         return [0.0]
 
     step = float(max(0.1, sheet_thickness_mm))
-    offsets = (np.arange(selected_layers, dtype=float) - 0.5 * (selected_layers - 1)) * step
+    offsets = (
+        np.arange(selected_layers, dtype=float) - 0.5 * (selected_layers - 1)
+    ) * step
 
     if member_thickness_mm is not None and member_thickness_mm > 1e-6:
         max_abs = float(np.max(np.abs(offsets)))
@@ -1516,7 +1786,7 @@ def _filter_invalid_part_intersections(
     enabled: bool,
     allow_joint_intent: bool,
     clearance_mm: float,
-) -> Tuple[List[ManufacturingPart], Dict[str, int | bool | float]]:
+) -> Tuple[List[ManufacturingPart], Dict[str, Any]]:
     if not enabled or len(parts) < 2:
         return (
             parts,
@@ -1526,6 +1796,9 @@ def _filter_invalid_part_intersections(
                 "intersection_dropped_count": 0,
                 "intersection_allowed_stack_count": 0,
                 "intersection_allowed_joint_intent_count": 0,
+                "intersection_events": [],
+                "intersection_part_decisions": [],
+                "intersection_dropped_part_ids": [],
             },
         )
 
@@ -1538,12 +1811,17 @@ def _filter_invalid_part_intersections(
     dropped_count = 0
     allowed_stack = 0
     allowed_joint_intent_count = 0
+    intersection_events: List[Dict[str, Any]] = []
+    part_decisions: List[Dict[str, Any]] = []
+    dropped_part_ids: List[str] = []
 
     for part in ordered:
+        candidate_id = str(part.part_id)
         rejected = False
         local_conflicts = 0
         local_allowed_stack = 0
         local_allowed_joint_intent = 0
+        decision_reason = "kept_no_conflict"
         for prev in kept:
             if not _parts_intersect(part, prev, clearance_mm=clearance_mm):
                 continue
@@ -1554,6 +1832,15 @@ def _filter_invalid_part_intersections(
             if group_a and group_b and group_a == group_b:
                 allowed_stack += 1
                 local_allowed_stack += 1
+                intersection_events.append(
+                    {
+                        "candidate_part_id": candidate_id,
+                        "against_part_id": str(prev.part_id),
+                        "action": "allow_stack_group",
+                        "stack_group_id": group_a,
+                        "clearance_mm": float(clearance_mm),
+                    }
+                )
                 continue
 
             # Use plane geometry to decide: only parallel parts on the same
@@ -1562,24 +1849,77 @@ def _filter_invalid_part_intersections(
             if not _is_genuine_plane_conflict(part, prev, clearance_mm):
                 allowed_joint_intent_count += 1
                 local_allowed_joint_intent += 1
+                intersection_events.append(
+                    {
+                        "candidate_part_id": candidate_id,
+                        "against_part_id": str(prev.part_id),
+                        "action": "allow_nonparallel_joint_intent",
+                        "clearance_mm": float(clearance_mm),
+                    }
+                )
                 continue
 
             rejected = True
+            decision_reason = "reject_genuine_plane_conflict"
+            intersection_events.append(
+                {
+                    "candidate_part_id": candidate_id,
+                    "against_part_id": str(prev.part_id),
+                    "action": "reject_genuine_plane_conflict",
+                    "clearance_mm": float(clearance_mm),
+                }
+            )
             break
 
         if rejected:
             dropped_count += 1
+            dropped_part_ids.append(candidate_id)
+            part_decisions.append(
+                {
+                    "part_id_before_reindex": candidate_id,
+                    "decision": "dropped",
+                    "reason": decision_reason,
+                    "conflict_count": int(local_conflicts),
+                    "allowed_stack_contacts": int(local_allowed_stack),
+                    "allowed_joint_intent_contacts": int(local_allowed_joint_intent),
+                }
+            )
             continue
         part.metadata["intersection_conflict_count"] = int(local_conflicts)
         part.metadata["intersection_allowed_stack_contacts"] = int(local_allowed_stack)
         part.metadata["intersection_allowed_joint_intent_contacts"] = int(
             local_allowed_joint_intent
         )
+        part_decisions.append(
+            {
+                "part_id_before_reindex": candidate_id,
+                "decision": "kept",
+                "reason": decision_reason,
+                "conflict_count": int(local_conflicts),
+                "allowed_stack_contacts": int(local_allowed_stack),
+                "allowed_joint_intent_contacts": int(local_allowed_joint_intent),
+            }
+        )
         kept.append(part)
 
     kept.sort(key=lambda p: p.part_id)
+    reindex_map: Dict[str, str] = {}
     for idx, part in enumerate(kept):
-        part.part_id = f"part_{idx:02d}"
+        old_id = str(part.part_id)
+        new_id = f"part_{idx:02d}"
+        part.part_id = new_id
+        reindex_map[old_id] = new_id
+    for row in part_decisions:
+        old = str(row.get("part_id_before_reindex", ""))
+        if old in reindex_map:
+            row["part_id_after_reindex"] = reindex_map[old]
+    for event in intersection_events:
+        old_cand = str(event.get("candidate_part_id", ""))
+        old_against = str(event.get("against_part_id", ""))
+        if old_cand in reindex_map:
+            event["candidate_part_id_after_reindex"] = reindex_map[old_cand]
+        if old_against in reindex_map:
+            event["against_part_id_after_reindex"] = reindex_map[old_against]
 
     debug = {
         "intersection_filter_enabled": bool(enabled),
@@ -1587,6 +1927,10 @@ def _filter_invalid_part_intersections(
         "intersection_dropped_count": int(dropped_count),
         "intersection_allowed_stack_count": int(allowed_stack),
         "intersection_allowed_joint_intent_count": int(allowed_joint_intent_count),
+        "intersection_events": intersection_events,
+        "intersection_part_decisions": part_decisions,
+        "intersection_dropped_part_ids": dropped_part_ids,
+        "intersection_reindex_map": reindex_map,
     }
     return kept, debug
 
@@ -1729,13 +2073,19 @@ def _obb_max_separation(
     return float(max_sep)
 
 
-def _synthesize_joint_specs(
+def _identify_joint_contact_pairs(
     parts: List[ManufacturingPart],
-    joint_distance_mm: float,
-    contact_tolerance_mm: float,
+    contact_tolerance_mm: float = 2.0,
     parallel_dot_threshold: float = 0.95,
-) -> List[JointSpec]:
-    joints: List[JointSpec] = []
+    joint_distance_mm: float = 240.0,
+) -> Set[Tuple[int, int]]:
+    """Identify part index pairs that will need joints (pre-trim).
+
+    Uses OBB contact detection + parallelism filtering only.
+    Does NOT need trimmed outlines.
+    Returns set of (i, j) tuples where i < j.
+    """
+    pairs: Set[Tuple[int, int]] = set()
     parallel_threshold = float(np.clip(parallel_dot_threshold, 0.0, 0.999999))
     for i in range(len(parts)):
         for j in range(i + 1, len(parts)):
@@ -1744,50 +2094,1038 @@ def _synthesize_joint_specs(
             group_a = str(pa.metadata.get("stack_group_id", "")).strip()
             group_b = str(pb.metadata.get("stack_group_id", "")).strip()
             if group_a and group_b and group_a == group_b:
-                # Labeled sheet laminations are a single physical member.
                 continue
 
             n_a = _rotation_to_normal(pa.rotation_3d)
             n_b = _rotation_to_normal(pb.rotation_3d)
             if abs(float(np.dot(n_a, n_b))) >= parallel_threshold:
-                # Parallel/near-parallel faces are handled by glue/screws, not explicit joints.
                 continue
 
             in_contact, signed_gap = _parts_in_contact_band(
-                pa,
-                pb,
-                contact_tolerance_mm=contact_tolerance_mm,
+                pa, pb, contact_tolerance_mm=contact_tolerance_mm,
             )
             if not in_contact:
                 continue
 
             distance = float(np.linalg.norm(pa.position_3d - pb.position_3d))
-            # Guard against pathological pairings when loose contact tolerance is used.
             if distance > float(max(1.0, joint_distance_mm * 1.8)):
                 continue
 
-            if pa.bend_ops or pb.bend_ops:
-                joint_type = "through_bolt"
-                fastener = "M6_bolt"
-            else:
-                joint_type = "tab_slot"
-                fastener = None
+            pairs.add((i, j))
+    return pairs
 
-            joints.append(
-                JointSpec(
-                    joint_type=joint_type,
-                    part_a=pa.part_id,
-                    part_b=pb.part_id,
-                    geometry={
-                        "distance_mm": distance,
-                        "contact_gap_mm": float(max(0.0, signed_gap)),
-                        "overlap_mm": float(max(0.0, -signed_gap)),
-                    },
-                    clearance_mm=0.254,
-                    fastener_spec=fastener,
-                )
+
+def _synthesize_joint_specs(
+    parts: List[ManufacturingPart],
+    joint_distance_mm: float,
+    contact_tolerance_mm: float,
+    parallel_dot_threshold: float = 0.95,
+    contact_pairs: Optional[Set[Tuple[int, int]]] = None,
+) -> List[JointSpec]:
+    joints: List[JointSpec] = []
+    parallel_threshold = float(np.clip(parallel_dot_threshold, 0.0, 0.999999))
+
+    # If contact_pairs were pre-computed, iterate only those pairs.
+    if contact_pairs is not None:
+        candidate_pairs = sorted(contact_pairs)
+    else:
+        candidate_pairs = [
+            (i, j) for i in range(len(parts)) for j in range(i + 1, len(parts))
+        ]
+
+    for i, j in candidate_pairs:
+        pa = parts[i]
+        pb = parts[j]
+        group_a = str(pa.metadata.get("stack_group_id", "")).strip()
+        group_b = str(pb.metadata.get("stack_group_id", "")).strip()
+        if group_a and group_b and group_a == group_b:
+            continue
+
+        n_a = _rotation_to_normal(pa.rotation_3d)
+        n_b = _rotation_to_normal(pb.rotation_3d)
+        if abs(float(np.dot(n_a, n_b))) >= parallel_threshold:
+            continue
+
+        # Re-check contact (outlines may have changed after trimming)
+        in_contact, signed_gap = _parts_in_contact_band(
+            pa, pb, contact_tolerance_mm=contact_tolerance_mm,
+        )
+        if not in_contact:
+            continue
+
+        distance = float(np.linalg.norm(pa.position_3d - pb.position_3d))
+        if distance > float(max(1.0, joint_distance_mm * 1.8)):
+            continue
+
+        if pa.bend_ops or pb.bend_ops:
+            joint_type = "through_bolt"
+            fastener = "M6_bolt"
+        else:
+            joint_type = "tab_slot"
+            fastener = None
+
+        joints.append(
+            JointSpec(
+                joint_type=joint_type,
+                part_a=pa.part_id,
+                part_b=pb.part_id,
+                geometry={
+                    "distance_mm": distance,
+                    "contact_gap_mm": float(max(0.0, signed_gap)),
+                    "overlap_mm": float(max(0.0, -signed_gap)),
+                },
+                clearance_mm=0.254,
+                fastener_spec=fastener,
             )
+        )
     return joints
+
+
+# ─── Joint geometry: tabs, slots, cross-laps ─────────────────────────────────
+
+
+def _compute_contact_line(
+    part_a: ManufacturingPart,
+    part_b: ManufacturingPart,
+) -> Optional[Tuple[np.ndarray, LineString, LineString]]:
+    """Compute 3D plane-plane intersection and clip to both outlines.
+
+    Returns (line_dir_3d, line_2d_a, line_2d_b) or None.
+    """
+    prof_a = part_a.profile
+    prof_b = part_b.profile
+    if (
+        prof_a.basis_u is None
+        or prof_a.basis_v is None
+        or prof_a.origin_3d is None
+        or prof_b.basis_u is None
+        or prof_b.basis_v is None
+        or prof_b.origin_3d is None
+    ):
+        return None
+
+    n_a = _rotation_to_normal(part_a.rotation_3d)
+    n_b = _rotation_to_normal(part_b.rotation_3d)
+    line_dir = np.cross(n_a, n_b)
+    if np.linalg.norm(line_dir) < 0.1:
+        return None
+    line_dir = line_dir / np.linalg.norm(line_dir)
+
+    d_a = float(np.dot(n_a, prof_a.origin_3d))
+    d_b = float(np.dot(n_b, prof_b.origin_3d))
+
+    A = np.array([n_a, n_b, line_dir])
+    b = np.array([d_a, d_b, 0.0])
+    try:
+        p0 = np.linalg.solve(A, b)
+    except np.linalg.LinAlgError:
+        return None
+
+    # Build long 3D segment along the intersection line
+    far = 5000.0
+    p_start = p0 - far * line_dir
+    p_end = p0 + far * line_dir
+
+    # Project into part_a's 2D frame and clip
+    a0 = prof_a.project_3d_to_2d(p_start)
+    a1 = prof_a.project_3d_to_2d(p_end)
+    line_a = LineString([a0, a1])
+    clipped_a = prof_a.outline.intersection(line_a)
+    if clipped_a.is_empty or clipped_a.length < 1e-3:
+        return None
+
+    # Project into part_b's 2D frame and clip
+    b0 = prof_b.project_3d_to_2d(p_start)
+    b1 = prof_b.project_3d_to_2d(p_end)
+    line_b = LineString([b0, b1])
+    clipped_b = prof_b.outline.intersection(line_b)
+    if clipped_b.is_empty or clipped_b.length < 1e-3:
+        return None
+
+    # Ensure we have LineStrings (not MultiLineString)
+    if clipped_a.geom_type == "MultiLineString":
+        clipped_a = max(clipped_a.geoms, key=lambda g: g.length)
+    if clipped_b.geom_type == "MultiLineString":
+        clipped_b = max(clipped_b.geoms, key=lambda g: g.length)
+
+    if clipped_a.geom_type != "LineString" or clipped_b.geom_type != "LineString":
+        return None
+
+    return (line_dir, clipped_a, clipped_b)
+
+
+def _classify_joint_type(
+    part_a: ManufacturingPart,
+    part_b: ManufacturingPart,
+    line_2d_a: LineString,
+    line_2d_b: LineString,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Classify a joint as tab_slot, cross_lap, or butt.
+
+    Returns (type, tab_part_id_or_None, slot_part_id_or_None).
+    """
+    mid_a = line_2d_a.interpolate(0.5, normalized=True)
+    mid_b = line_2d_b.interpolate(0.5, normalized=True)
+
+    edge_dist_a = float(part_a.profile.outline.boundary.distance(mid_a))
+    edge_dist_b = float(part_b.profile.outline.boundary.distance(mid_b))
+
+    thresh_a = max(2.0 * part_a.thickness_mm, 10.0)
+    thresh_b = max(2.0 * part_b.thickness_mm, 10.0)
+
+    near_a = edge_dist_a < thresh_a
+    near_b = edge_dist_b < thresh_b
+
+    if near_a and not near_b:
+        return ("tab_slot", part_a.part_id, part_b.part_id)
+    if near_b and not near_a:
+        return ("tab_slot", part_b.part_id, part_a.part_id)
+    if not near_a and not near_b:
+        return ("cross_lap", None, None)
+    return ("butt", None, None)
+
+
+def _outward_perpendicular(
+    outline: Polygon,
+    point_2d: np.ndarray,
+    tangent_2d: np.ndarray,
+) -> np.ndarray:
+    """Return the perpendicular to tangent that points away from outline interior."""
+    perp1 = np.array([-tangent_2d[1], tangent_2d[0]])
+    perp2 = np.array([tangent_2d[1], -tangent_2d[0]])
+    test_dist = 1.0
+    p1 = Point(point_2d[0] + perp1[0] * test_dist, point_2d[1] + perp1[1] * test_dist)
+    if outline.contains(p1):
+        return perp2
+    return perp1
+
+
+def _apply_tab_slot(
+    tab_part: ManufacturingPart,
+    slot_part: ManufacturingPart,
+    line_2d_tab: LineString,
+    line_2d_slot: LineString,
+    line_dir_3d: np.ndarray,
+    clearance: float,
+    input_spec: Step3Input,
+) -> Optional[dict]:
+    """Add tab protrusions to tab_part and slot cutouts to slot_part.
+
+    Returns geometry debug dict, or None to fall back to butt.
+    """
+    min_slot_width = DFMConfig.from_material(slot_part.material_key).min_slot_width_mm
+    tab_width = slot_part.thickness_mm - 2.0 * clearance
+    if tab_width < min_slot_width:
+        return None
+
+    tab_depth = tab_part.thickness_mm
+    tab_length = input_spec.joint_tab_length_mm
+    contact_length = line_2d_tab.length
+    tab_spacing = input_spec.joint_tab_spacing_mm
+
+    # Tab placement: anchor tabs near both ends first, then fill the middle.
+    # Edge inset must keep the full slot footprint (half slot length + dogbone
+    # relief) inside the slot part's outline, plus the DFM minimum bridge width
+    # between the cutout edge and the part outline edge.
+    dfm = DFMConfig.from_material(slot_part.material_key)
+    dfm_relief = dfm.min_internal_radius_mm
+    slot_half_footprint = (tab_length + clearance) / 2.0 + dfm_relief + 0.5
+    edge_inset = slot_half_footprint + dfm.min_bridge_width_mm
+    min_two_tab_contact = 2 * edge_inset + tab_length
+
+    if contact_length >= min_two_tab_contact:
+        # Two end tabs, then fill the middle gap if spacing allows.
+        frac_first = edge_inset / contact_length
+        frac_last = 1.0 - frac_first
+        middle_span = contact_length - 2 * edge_inset
+        n_middle = max(0, int(middle_span / tab_spacing) - 1)
+        n_middle = min(n_middle, 3)  # cap total at 5
+        tab_fracs = [frac_first]
+        for mi in range(n_middle):
+            tab_fracs.append(
+                frac_first + (mi + 1) / (n_middle + 1) * (frac_last - frac_first)
+            )
+        tab_fracs.append(frac_last)
+    else:
+        # Too short for two — single centered tab.
+        tab_fracs = [0.5]
+
+    tabs_info = []
+    coords_tab = np.array(line_2d_tab.coords)
+    tangent_tab = coords_tab[-1] - coords_tab[0]
+    tang_len = np.linalg.norm(tangent_tab)
+    if tang_len < 1e-6:
+        return None
+    tangent_tab = tangent_tab / tang_len
+
+    # Precompute tab part's normal for thickness-center offset
+    n_tab = _rotation_to_normal(tab_part.rotation_3d)
+    outline_boundary = tab_part.profile.outline.boundary
+
+    # Compute tab protrusion direction: outward from the part interior toward
+    # the contact edge.  We use the direction from the outline's centroid to
+    # the contact midpoint, projected onto the perpendicular to the contact
+    # tangent.  This is robust regardless of outline expansion (stacking) or
+    # degenerate slot-origin projections.
+    contact_mid = np.array(line_2d_tab.interpolate(0.5, normalized=True).coords[0])
+    centroid = np.array(tab_part.profile.outline.centroid.coords[0])
+    outward_from_centroid = contact_mid - centroid
+    perp_candidate = np.array([-tangent_tab[1], tangent_tab[0]])
+    if np.dot(outward_from_centroid, perp_candidate) >= 0:
+        outward_tab = perp_candidate
+    else:
+        outward_tab = -perp_candidate
+
+    pre_tab_bbox = list(tab_part.profile.outline.bounds)  # [minx, miny, maxx, maxy]
+
+    for frac in tab_fracs:
+        pt_on_tab = np.array(line_2d_tab.interpolate(frac, normalized=True).coords[0])
+
+        # Snap tab base to the nearest point on the outline boundary so the
+        # tab protrudes BEYOND the current outline edge, not inside it.
+        nearest = outline_boundary.interpolate(
+            outline_boundary.project(Point(pt_on_tab[0], pt_on_tab[1]))
+        )
+        pt_on_edge = np.array([nearest.x, nearest.y])
+
+        # Build tab rectangle from the outline edge, extending outward
+        half_len = tab_length / 2.0
+        corners = [
+            pt_on_edge - half_len * tangent_tab,
+            pt_on_edge + half_len * tangent_tab,
+            pt_on_edge + half_len * tangent_tab + tab_depth * outward_tab,
+            pt_on_edge - half_len * tangent_tab + tab_depth * outward_tab,
+        ]
+        tab_rect = Polygon(corners)
+        tab_rect = _clean_polygon(tab_rect)
+        if tab_rect is None:
+            continue
+
+        # Union tab rectangle with tab part's outline
+        new_outline = tab_part.profile.outline.union(tab_rect)
+        new_outline = _clean_polygon(new_outline)
+        if new_outline is not None:
+            tab_part.profile.outline = new_outline
+            # Update boundary reference after outline change
+            outline_boundary = tab_part.profile.outline.boundary
+
+        # Project tab center to 3D, offset by half thickness toward slot part,
+        # then project to slot part's 2D so the slot is centered on the tab
+        # part's thickness, not at one surface.
+        center_3d = tab_part.profile.project_2d_to_3d(pt_on_tab[0], pt_on_tab[1])
+        toward_slot = slot_part.profile.origin_3d - center_3d
+        sign = 1.0 if np.dot(toward_slot, n_tab) > 0 else -1.0
+        center_3d_centered = center_3d + sign * 0.5 * tab_part.thickness_mm * n_tab
+        center_slot_2d = slot_part.profile.project_3d_to_2d(center_3d_centered)
+        center_slot = np.array(center_slot_2d)
+
+        # Build slot rectangle in slot part's 2D frame.
+        # Use the contact line direction in the slot part's own 2D frame
+        # (not the tab tangent projected through 3D, which can rotate).
+        coords_slot = np.array(line_2d_slot.coords)
+        slot_tangent = coords_slot[-1] - coords_slot[0]
+        st_len = np.linalg.norm(slot_tangent)
+        if st_len < 1e-8:
+            continue
+        slot_tangent = slot_tangent / st_len
+        slot_perp = np.array([-slot_tangent[1], slot_tangent[0]])
+
+        slot_half_len = (tab_length + clearance) / 2.0
+        slot_half_wid = (tab_part.thickness_mm + 2.0 * clearance) / 2.0
+        slot_corners = [
+            center_slot - slot_half_len * slot_tangent - slot_half_wid * slot_perp,
+            center_slot + slot_half_len * slot_tangent - slot_half_wid * slot_perp,
+            center_slot + slot_half_len * slot_tangent + slot_half_wid * slot_perp,
+            center_slot - slot_half_len * slot_tangent + slot_half_wid * slot_perp,
+        ]
+        slot_rect = Polygon(slot_corners)
+        slot_rect = _clean_polygon(slot_rect)
+        if slot_rect is None:
+            continue
+
+        # Add dogbone relief for CNC internal corners
+        slot_rect = add_dogbone_relief(slot_rect, dfm.min_internal_radius_mm)
+        slot_part.profile.cutouts.append(slot_rect)
+
+        tabs_info.append(
+            {
+                "center_2d_tab": [float(pt_on_tab[0]), float(pt_on_tab[1])],
+                "center_2d_slot": [float(center_slot[0]), float(center_slot[1])],
+            }
+        )
+
+    if not tabs_info:
+        return None
+
+    slot_width = tab_part.thickness_mm + 2.0 * clearance
+    return {
+        "tab_part": tab_part.part_id,
+        "slot_part": slot_part.part_id,
+        "tab_count": len(tabs_info),
+        "tab_width_mm": float(tab_width),
+        "tab_depth_mm": float(tab_depth),
+        "slot_width_mm": float(slot_width),
+        "tabs": tabs_info,
+        "pre_tab_bbox": pre_tab_bbox,
+    }
+
+
+def _apply_cross_lap(
+    part_a: ManufacturingPart,
+    part_b: ManufacturingPart,
+    line_2d_a: LineString,
+    line_2d_b: LineString,
+    line_dir_3d: np.ndarray,
+    clearance: float,
+) -> Optional[dict]:
+    """Add cross-lap slots to both parts. Each gets a slot from one end to the midpoint."""
+    dfm_a = DFMConfig.from_material(part_a.material_key)
+    dfm_b = DFMConfig.from_material(part_b.material_key)
+
+    slot_a_width = part_b.thickness_mm + 2.0 * clearance
+    slot_b_width = part_a.thickness_mm + 2.0 * clearance
+
+    for part, line_2d, slot_width, dfm, from_start in [
+        (part_a, line_2d_a, slot_a_width, dfm_a, True),
+        (part_b, line_2d_b, slot_b_width, dfm_b, False),
+    ]:
+        coords = np.array(line_2d.coords)
+        midpoint = np.array(line_2d.interpolate(0.5, normalized=True).coords[0])
+        if from_start:
+            slot_start = coords[0]
+            slot_end = midpoint
+        else:
+            slot_start = midpoint
+            slot_end = coords[-1]
+
+        slot_vec = slot_end - slot_start
+        slot_len = float(np.linalg.norm(slot_vec))
+        if slot_len < 1e-3:
+            continue
+        slot_dir = slot_vec / slot_len
+        slot_perp = np.array([-slot_dir[1], slot_dir[0]])
+
+        half_w = slot_width / 2.0
+        corners = [
+            slot_start - half_w * slot_perp,
+            slot_end - half_w * slot_perp,
+            slot_end + half_w * slot_perp,
+            slot_start + half_w * slot_perp,
+        ]
+        slot_rect = Polygon(corners)
+        slot_rect = _clean_polygon(slot_rect)
+        if slot_rect is None:
+            continue
+
+        slot_rect = add_dogbone_relief(slot_rect, dfm.min_internal_radius_mm)
+        part.profile.cutouts.append(slot_rect)
+
+    return {
+        "slot_a_width_mm": float(slot_a_width),
+        "slot_b_width_mm": float(slot_b_width),
+    }
+
+
+def _apply_joint_geometry(
+    parts: List[ManufacturingPart],
+    joints: List[JointSpec],
+    input_spec: Step3Input,
+) -> Tuple[List[ManufacturingPart], List[JointSpec], dict]:
+    """Apply tab/slot/cross-lap geometry to parts based on joint specs."""
+    debug = {
+        "joint_geometry_enabled": input_spec.joint_enable_geometry,
+        "joints_processed": 0,
+        "joints_skipped_no_basis": 0,
+        "joints_skipped_parallel": 0,
+        "joints_skipped_no_contact": 0,
+        "tab_slot_count": 0,
+        "cross_lap_count": 0,
+        "butt_count": 0,
+        "tabs_created": 0,
+        "slots_created": 0,
+        "cutout_overlap_warnings": 0,
+    }
+
+    if not input_spec.joint_enable_geometry:
+        return parts, joints, debug
+
+    part_map: Dict[str, ManufacturingPart] = {p.part_id: p for p in parts}
+
+    # Build a lookup from stack_group_id → list of layer indices
+    stack_groups: Dict[str, List[ManufacturingPart]] = {}
+    for p in parts:
+        gid = str(p.metadata.get("stack_group_id", "")).strip()
+        if gid:
+            stack_groups.setdefault(gid, []).append(p)
+
+    for spec in joints:
+        if spec.joint_type == "through_bolt":
+            continue
+
+        pa = part_map.get(spec.part_a)
+        pb = part_map.get(spec.part_b)
+        if pa is None or pb is None:
+            continue
+
+        # Skip if either part lacks basis vectors
+        if (
+            pa.profile.basis_u is None
+            or pa.profile.origin_3d is None
+            or pb.profile.basis_u is None
+            or pb.profile.origin_3d is None
+        ):
+            debug["joints_skipped_no_basis"] += 1
+            continue
+
+        # For stacked parts, only process the layer closest to the partner
+        for part, other in [(pa, pb), (pb, pa)]:
+            gid = str(part.metadata.get("stack_group_id", "")).strip()
+            if gid and gid in stack_groups and len(stack_groups[gid]) > 1:
+                layers = stack_groups[gid]
+                closest = min(
+                    layers,
+                    key=lambda lp: float(
+                        np.linalg.norm(lp.position_3d - other.position_3d)
+                    ),
+                )
+                if part.part_id != closest.part_id:
+                    # This is not the closest layer — skip this joint pair
+                    break
+        else:
+            # Both parts are the closest layers (or not stacked) — proceed
+            pass
+
+        # This is a bit awkward — we need to detect the break above
+        # Rewrite: check both parts
+        skip = False
+        for part, other in [(pa, pb), (pb, pa)]:
+            gid = str(part.metadata.get("stack_group_id", "")).strip()
+            if gid and gid in stack_groups and len(stack_groups[gid]) > 1:
+                layers = stack_groups[gid]
+                closest = min(
+                    layers,
+                    key=lambda lp: float(
+                        np.linalg.norm(lp.position_3d - other.position_3d)
+                    ),
+                )
+                if part.part_id != closest.part_id:
+                    skip = True
+                    break
+        if skip:
+            continue
+
+        contact = _compute_contact_line(pa, pb)
+        if contact is None:
+            debug["joints_skipped_parallel"] += 1
+            continue
+
+        line_dir_3d, line_2d_a, line_2d_b = contact
+
+        # Check minimum contact length
+        contact_length = min(line_2d_a.length, line_2d_b.length)
+        if contact_length < input_spec.joint_min_contact_mm:
+            debug["joints_skipped_no_contact"] += 1
+            spec.joint_type = "butt"
+            debug["butt_count"] += 1
+            continue
+
+        debug["joints_processed"] += 1
+
+        jtype, tab_id, slot_id = _classify_joint_type(pa, pb, line_2d_a, line_2d_b)
+
+        # Store classification debug info
+        mid_a = line_2d_a.interpolate(0.5, normalized=True)
+        mid_b = line_2d_b.interpolate(0.5, normalized=True)
+        edge_dist_a = float(pa.profile.outline.boundary.distance(mid_a))
+        edge_dist_b = float(pb.profile.outline.boundary.distance(mid_b))
+        spec.geometry.update(
+            {
+                "classification": jtype,
+                "edge_dist_a_mm": edge_dist_a,
+                "edge_dist_b_mm": edge_dist_b,
+                "edge_threshold_a_mm": max(2.0 * pa.thickness_mm, 10.0),
+                "edge_threshold_b_mm": max(2.0 * pb.thickness_mm, 10.0),
+                "contact_length_mm": float(contact_length),
+                "contact_line_2d_a": [list(c) for c in line_2d_a.coords],
+                "contact_line_2d_b": [list(c) for c in line_2d_b.coords],
+            }
+        )
+
+        if jtype == "tab_slot":
+            assert tab_id is not None and slot_id is not None
+            tab_p = part_map[tab_id]
+            slot_p = part_map[slot_id]
+            line_tab = line_2d_a if tab_id == pa.part_id else line_2d_b
+            line_slot = line_2d_b if tab_id == pa.part_id else line_2d_a
+
+            geom = _apply_tab_slot(
+                tab_p,
+                slot_p,
+                line_tab,
+                line_slot,
+                line_dir_3d,
+                spec.clearance_mm,
+                input_spec,
+            )
+            if geom is not None:
+                spec.joint_type = "tab_slot"
+                spec.geometry.update(geom)
+                debug["tab_slot_count"] += 1
+                debug["tabs_created"] += geom["tab_count"]
+                debug["slots_created"] += geom["tab_count"]
+            else:
+                spec.joint_type = "butt"
+                debug["butt_count"] += 1
+
+        elif jtype == "cross_lap":
+            geom = _apply_cross_lap(
+                pa,
+                pb,
+                line_2d_a,
+                line_2d_b,
+                line_dir_3d,
+                spec.clearance_mm,
+            )
+            if geom is not None:
+                spec.joint_type = "cross_lap"
+                spec.geometry.update(geom)
+                debug["cross_lap_count"] += 1
+            else:
+                spec.joint_type = "butt"
+                debug["butt_count"] += 1
+
+        else:
+            spec.joint_type = "butt"
+            debug["butt_count"] += 1
+
+    # Cutout overlap check
+    overlap_warnings = 0
+    for part in parts:
+        cutouts = part.profile.cutouts
+        for i in range(len(cutouts)):
+            for j in range(i + 1, len(cutouts)):
+                if cutouts[i].intersects(cutouts[j]):
+                    logger.warning(
+                        "Part %s: cutouts %d and %d overlap",
+                        part.part_id,
+                        i,
+                        j,
+                    )
+                    overlap_warnings += 1
+    debug["cutout_overlap_warnings"] = overlap_warnings
+
+    return parts, joints, debug
+
+
+def _validate_joint_fit_2d(
+    parts: List[ManufacturingPart],
+    joints: List[JointSpec],
+) -> Tuple[List[Step3Violation], dict]:
+    """Verify 2D fit properties for each joint with geometry.
+
+    Checks:
+    - Tab cross-section fits inside slot (tab_slot joints)
+    - Slot cutouts are inside part outlines
+    - No cutout-cutout collisions within a part
+    """
+    violations: List[Step3Violation] = []
+    debug = {
+        "joint_fit_checks_run": 0,
+        "joint_fit_tab_slot_ok": 0,
+        "joint_fit_cross_lap_ok": 0,
+        "joint_fit_errors": 0,
+        "joint_fit_warnings": 0,
+    }
+
+    part_map: Dict[str, ManufacturingPart] = {p.part_id: p for p in parts}
+
+    for jspec in joints:
+        geom = jspec.geometry
+        classification = geom.get("classification")
+        if classification not in ("tab_slot", "cross_lap"):
+            continue
+
+        debug["joint_fit_checks_run"] += 1
+        joint_ok = True
+
+        if classification == "tab_slot":
+            tab_id = geom.get("tab_part")
+            slot_id = geom.get("slot_part")
+            if not tab_id or not slot_id:
+                continue
+            tab_part = part_map.get(tab_id)
+            slot_part = part_map.get(slot_id)
+            if tab_part is None or slot_part is None:
+                continue
+
+            # Check 1: Tab cross-section fits inside slot
+            tab_width = geom.get("tab_width_mm", 0)
+            tab_depth = geom.get("tab_depth_mm", 0)
+            slot_width = geom.get("slot_width_mm", 0)
+            clearance = jspec.clearance_mm
+            tabs = geom.get("tabs", [])
+
+            # Get slot tangent direction from contact line
+            contact_coords_slot = geom.get(
+                "contact_line_2d_b" if tab_id == jspec.part_a else "contact_line_2d_a"
+            )
+            if contact_coords_slot and len(contact_coords_slot) >= 2:
+                slot_tangent = np.array(contact_coords_slot[-1]) - np.array(
+                    contact_coords_slot[0]
+                )
+                st_len = np.linalg.norm(slot_tangent)
+                if st_len > 1e-8:
+                    slot_tangent = slot_tangent / st_len
+                else:
+                    slot_tangent = np.array([1.0, 0.0])
+            else:
+                slot_tangent = np.array([1.0, 0.0])
+            slot_perp = np.array([-slot_tangent[1], slot_tangent[0]])
+
+            for tab_info in tabs:
+                center_slot = np.array(tab_info.get("center_2d_slot", [0, 0]))
+
+                # Build tab cross-section rectangle at center_2d_slot
+                tab_half_w = tab_width / 2.0
+                tab_half_d = tab_depth / 2.0
+                tab_corners = [
+                    center_slot - tab_half_w * slot_perp - tab_half_d * slot_tangent,
+                    center_slot + tab_half_w * slot_perp - tab_half_d * slot_tangent,
+                    center_slot + tab_half_w * slot_perp + tab_half_d * slot_tangent,
+                    center_slot - tab_half_w * slot_perp + tab_half_d * slot_tangent,
+                ]
+                tab_cross = Polygon(tab_corners)
+
+                # Build slot rectangle at same center
+                slot_half_w = slot_width / 2.0
+                slot_half_d = (tab_depth + 2.0 * clearance) / 2.0
+                slot_corners = [
+                    center_slot - slot_half_w * slot_perp - slot_half_d * slot_tangent,
+                    center_slot + slot_half_w * slot_perp - slot_half_d * slot_tangent,
+                    center_slot + slot_half_w * slot_perp + slot_half_d * slot_tangent,
+                    center_slot - slot_half_w * slot_perp + slot_half_d * slot_tangent,
+                ]
+                slot_poly = Polygon(slot_corners)
+
+                if tab_cross.is_valid and slot_poly.is_valid:
+                    # Check with 0.1mm tolerance buffer
+                    buffered_slot = slot_poly.buffer(0.1)
+                    if not buffered_slot.contains(tab_cross):
+                        violations.append(
+                            Step3Violation(
+                                code="joint_tab_exceeds_slot",
+                                severity="error",
+                                message=(
+                                    f"Tab cross-section doesn't fit inside slot "
+                                    f"(tab {tab_width:.1f}x{tab_depth:.1f}mm, "
+                                    f"slot width {slot_width:.1f}mm) "
+                                    f"between {tab_id} and {slot_id}"
+                                ),
+                                part_id=slot_id,
+                            )
+                        )
+                        debug["joint_fit_errors"] += 1
+                        joint_ok = False
+
+            # Check 2: Tab protrusion overextension
+            pre_bbox = geom.get("pre_tab_bbox")
+            if pre_bbox and tab_depth > 0:
+                post_bbox = tab_part.profile.outline.bounds
+                tolerance = tab_depth + 1.0  # allow tab_depth + 1mm margin
+                for axis, label in [
+                    (0, "min-x"),
+                    (1, "min-y"),
+                    (2, "max-x"),
+                    (3, "max-y"),
+                ]:
+                    if axis < 2:
+                        growth = pre_bbox[axis] - post_bbox[axis]
+                    else:
+                        growth = post_bbox[axis] - pre_bbox[axis]
+                    if growth > tolerance:
+                        violations.append(
+                            Step3Violation(
+                                code="joint_tab_overextension",
+                                severity="warning",
+                                message=(
+                                    f"Tab protrusions extend {growth:.1f}mm "
+                                    f"beyond pre-tab outline ({label}) on "
+                                    f"{tab_id} (expected max {tab_depth:.1f}mm)"
+                                ),
+                                part_id=tab_id,
+                            )
+                        )
+                        debug["joint_fit_warnings"] += 1
+                        joint_ok = False
+
+            # Check 3: Slot cutouts inside slot part outline
+            outline_buffered = slot_part.profile.outline.buffer(-0.1)
+            for cutout in slot_part.profile.cutouts:
+                if cutout.is_valid and not cutout.is_empty:
+                    if not outline_buffered.contains(cutout):
+                        violations.append(
+                            Step3Violation(
+                                code="joint_slot_outside_outline",
+                                severity="error",
+                                message=(
+                                    f"Slot cutout extends beyond part outline "
+                                    f"on {slot_id}"
+                                ),
+                                part_id=slot_id,
+                            )
+                        )
+                        debug["joint_fit_errors"] += 1
+                        joint_ok = False
+
+            if joint_ok:
+                debug["joint_fit_tab_slot_ok"] += 1
+
+        elif classification == "cross_lap":
+            pa = part_map.get(jspec.part_a)
+            pb = part_map.get(jspec.part_b)
+            if pa is None or pb is None:
+                continue
+
+            joint_ok = True
+
+            # Check 1: Slot cutouts inside outlines for both parts
+            for part in [pa, pb]:
+                outline_buffered = part.profile.outline.buffer(-0.1)
+                for cutout in part.profile.cutouts:
+                    if cutout.is_valid and not cutout.is_empty:
+                        if not outline_buffered.contains(cutout):
+                            violations.append(
+                                Step3Violation(
+                                    code="joint_slot_outside_outline",
+                                    severity="error",
+                                    message=(
+                                        f"Cross-lap slot cutout extends beyond "
+                                        f"part outline on {part.part_id}"
+                                    ),
+                                    part_id=part.part_id,
+                                )
+                            )
+                            debug["joint_fit_errors"] += 1
+                            joint_ok = False
+
+            if joint_ok:
+                debug["joint_fit_cross_lap_ok"] += 1
+
+    # Check 3: Cutout-cutout collisions across all parts
+    for part in parts:
+        cutouts = part.profile.cutouts
+        for i in range(len(cutouts)):
+            for j in range(i + 1, len(cutouts)):
+                if cutouts[i].is_valid and cutouts[j].is_valid:
+                    inter = cutouts[i].intersection(cutouts[j])
+                    if inter.area > 0.5:
+                        violations.append(
+                            Step3Violation(
+                                code="joint_cutout_collision",
+                                severity="warning",
+                                message=(
+                                    f"Cutouts {i} and {j} overlap "
+                                    f"({inter.area:.1f} mm²) on {part.part_id}"
+                                ),
+                                part_id=part.part_id,
+                            )
+                        )
+                        debug["joint_fit_warnings"] += 1
+
+    return violations, debug
+
+
+def _validate_joint_assembly_3d(
+    parts: List[ManufacturingPart],
+    joints: List[JointSpec],
+) -> Tuple[List[Step3Violation], dict]:
+    """Project joint features into 3D and verify mating pairs align.
+
+    Checks:
+    - Tab-slot 3D alignment (centers meet within tolerance)
+    - Part normal compatibility (tab-slot should be roughly perpendicular)
+    - Gap detection (parts not too far apart at joint contact)
+    """
+    violations: List[Step3Violation] = []
+    debug = {
+        "assembly_checks_run": 0,
+        "assembly_alignment_ok": 0,
+        "assembly_alignment_errors": 0,
+        "assembly_alignment_warnings": 0,
+        "assembly_max_misalignment_mm": 0.0,
+        "assembly_mean_misalignment_mm": 0.0,
+    }
+
+    part_map: Dict[str, ManufacturingPart] = {p.part_id: p for p in parts}
+    misalignments: List[float] = []
+
+    for jspec in joints:
+        geom = jspec.geometry
+        classification = geom.get("classification")
+
+        # --- Normal compatibility check (tab_slot only) ---
+        if classification == "tab_slot":
+            tab_id = geom.get("tab_part")
+            slot_id = geom.get("slot_part")
+            if not tab_id or not slot_id:
+                continue
+            tab_part = part_map.get(tab_id)
+            slot_part = part_map.get(slot_id)
+            if tab_part is None or slot_part is None:
+                continue
+
+            debug["assembly_checks_run"] += 1
+
+            n_tab = _rotation_to_normal(tab_part.rotation_3d)
+            n_slot = _rotation_to_normal(slot_part.rotation_3d)
+            dot_val = abs(float(np.dot(n_tab, n_slot)))
+            if dot_val > 0.95:
+                violations.append(
+                    Step3Violation(
+                        code="joint_3d_parallel_normals",
+                        severity="warning",
+                        message=(
+                            f"Tab-slot joint between {tab_id} and {slot_id} "
+                            f"has near-parallel normals (dot={dot_val:.3f})"
+                        ),
+                        part_id=tab_id,
+                    )
+                )
+                debug["assembly_alignment_warnings"] += 1
+
+            # --- Tab-slot 3D alignment ---
+            tabs = geom.get("tabs", [])
+            clearance = jspec.clearance_mm
+            tolerance = max(2.0, clearance * 3.0)
+            tab_depth = geom.get("tab_depth_mm", tab_part.thickness_mm)
+            joint_aligned = True
+
+            for tab_info in tabs:
+                c2d_tab = tab_info.get("center_2d_tab")
+                c2d_slot = tab_info.get("center_2d_slot")
+                if c2d_tab is None or c2d_slot is None:
+                    continue
+
+                if (
+                    tab_part.profile.basis_u is None
+                    or slot_part.profile.basis_u is None
+                ):
+                    continue
+
+                pt3d_tab = tab_part.profile.project_2d_to_3d(c2d_tab[0], c2d_tab[1])
+                pt3d_slot = slot_part.profile.project_2d_to_3d(c2d_slot[0], c2d_slot[1])
+                dist = float(np.linalg.norm(pt3d_tab - pt3d_slot))
+                misalignments.append(dist)
+
+                if dist > tab_depth + tolerance:
+                    violations.append(
+                        Step3Violation(
+                            code="joint_3d_misalignment",
+                            severity="warning",
+                            message=(
+                                f"Tab-slot 3D misalignment: {dist:.1f}mm "
+                                f"between {tab_id} and {slot_id} "
+                                f"(limit {tab_depth + tolerance:.1f}mm)"
+                            ),
+                            part_id=tab_id,
+                        )
+                    )
+                    debug["assembly_alignment_warnings"] += 1
+                    joint_aligned = False
+
+            if joint_aligned:
+                debug["assembly_alignment_ok"] += 1
+
+        elif classification == "cross_lap":
+            pa = part_map.get(jspec.part_a)
+            pb = part_map.get(jspec.part_b)
+            if pa is None or pb is None:
+                continue
+
+            debug["assembly_checks_run"] += 1
+
+            # Project contact line midpoints to 3D and check alignment
+            cl_a = geom.get("contact_line_2d_a")
+            cl_b = geom.get("contact_line_2d_b")
+            if cl_a and cl_b and len(cl_a) >= 2 and len(cl_b) >= 2:
+                if pa.profile.basis_u is not None and pb.profile.basis_u is not None:
+                    mid_a_2d = (
+                        (cl_a[0][0] + cl_a[-1][0]) / 2.0,
+                        (cl_a[0][1] + cl_a[-1][1]) / 2.0,
+                    )
+                    mid_b_2d = (
+                        (cl_b[0][0] + cl_b[-1][0]) / 2.0,
+                        (cl_b[0][1] + cl_b[-1][1]) / 2.0,
+                    )
+                    pt3d_a = pa.profile.project_2d_to_3d(mid_a_2d[0], mid_a_2d[1])
+                    pt3d_b = pb.profile.project_2d_to_3d(mid_b_2d[0], mid_b_2d[1])
+                    dist = float(np.linalg.norm(pt3d_a - pt3d_b))
+                    misalignments.append(dist)
+
+                    tolerance = max(2.0, jspec.clearance_mm * 3.0)
+                    max_gap = pa.thickness_mm + pb.thickness_mm + tolerance
+                    if dist > max_gap:
+                        violations.append(
+                            Step3Violation(
+                                code="joint_3d_misalignment",
+                                severity="warning",
+                                message=(
+                                    f"Cross-lap 3D misalignment: {dist:.1f}mm "
+                                    f"between {jspec.part_a} and {jspec.part_b} "
+                                    f"(limit {max_gap:.1f}mm)"
+                                ),
+                                part_id=jspec.part_a,
+                            )
+                        )
+                        debug["assembly_alignment_warnings"] += 1
+                    else:
+                        debug["assembly_alignment_ok"] += 1
+
+        # --- Gap detection for all classified joints ---
+        if classification in ("tab_slot", "cross_lap", "butt"):
+            pa = part_map.get(jspec.part_a)
+            pb = part_map.get(jspec.part_b)
+            if pa is None or pb is None:
+                continue
+
+            cl_a = geom.get("contact_line_2d_a")
+            cl_b = geom.get("contact_line_2d_b")
+            if cl_a and cl_b and len(cl_a) >= 2 and len(cl_b) >= 2:
+                if pa.profile.basis_u is not None and pb.profile.basis_u is not None:
+                    mid_a_2d = (
+                        (cl_a[0][0] + cl_a[-1][0]) / 2.0,
+                        (cl_a[0][1] + cl_a[-1][1]) / 2.0,
+                    )
+                    mid_b_2d = (
+                        (cl_b[0][0] + cl_b[-1][0]) / 2.0,
+                        (cl_b[0][1] + cl_b[-1][1]) / 2.0,
+                    )
+                    pt3d_a = pa.profile.project_2d_to_3d(mid_a_2d[0], mid_a_2d[1])
+                    pt3d_b = pb.profile.project_2d_to_3d(mid_b_2d[0], mid_b_2d[1])
+                    gap = float(np.linalg.norm(pt3d_a - pt3d_b))
+                    max_acceptable = pa.thickness_mm + pb.thickness_mm + 5.0
+                    if gap > max_acceptable:
+                        violations.append(
+                            Step3Violation(
+                                code="joint_3d_excessive_gap",
+                                severity="error",
+                                message=(
+                                    f"Excessive gap {gap:.1f}mm between "
+                                    f"{jspec.part_a} and {jspec.part_b} "
+                                    f"(limit {max_acceptable:.1f}mm)"
+                                ),
+                                part_id=jspec.part_a,
+                            )
+                        )
+                        debug["assembly_alignment_errors"] += 1
+
+    if misalignments:
+        debug["assembly_max_misalignment_mm"] = float(max(misalignments))
+        debug["assembly_mean_misalignment_mm"] = float(
+            sum(misalignments) / len(misalignments)
+        )
+
+    return violations, debug
 
 
 def _build_design(
@@ -1817,14 +3155,25 @@ def _build_design(
                     "label": "bend_line",
                 }
             )
+        for cutout in part.profile.cutouts:
+            if not cutout.is_empty:
+                component.features.append(
+                    {
+                        "type": "slot",
+                        "outline": list(cutout.exterior.coords),
+                    }
+                )
         design.add_component(component)
 
+    _JOINT_TYPE_MAP = {
+        "through_bolt": JointType.THROUGH_BOLT,
+        "tab_slot": JointType.TAB_SLOT,
+        "cross_lap": JointType.HALF_LAP,
+        "butt": JointType.BUTT,
+    }
+
     for spec in joints:
-        jt = (
-            JointType.THROUGH_BOLT
-            if spec.joint_type == "through_bolt"
-            else JointType.TAB_SLOT
-        )
+        jt = _JOINT_TYPE_MAP.get(spec.joint_type, JointType.TAB_SLOT)
         design.assembly.add_joint(
             Joint(
                 component_a=spec.part_a,
@@ -1948,22 +3297,447 @@ def _convert_dfm_violations(
     ]
 
 
+_SLAB_INTERIOR_TOL = 0.5  # mm — ignore vertices within this distance of slab faces
+
+
+def _part_geometry_summary(parts: List[ManufacturingPart]) -> Dict[str, Any]:
+    """Summarize part geometry for phase-level debugging."""
+    rows: List[Dict[str, Any]] = []
+    total_area = 0.0
+    total_perimeter = 0.0
+    for part in parts:
+        outline = part.profile.outline
+        area = float(max(0.0, outline.area))
+        perimeter = float(max(0.0, outline.length))
+        bounds = outline.bounds
+        rows.append(
+            {
+                "part_id": part.part_id,
+                "area_mm2": round(area, 4),
+                "perimeter_mm": round(perimeter, 4),
+                "bbox_mm": [
+                    round(float(bounds[0]), 4),
+                    round(float(bounds[1]), 4),
+                    round(float(bounds[2]), 4),
+                    round(float(bounds[3]), 4),
+                ],
+                "region_type": part.region_type.value,
+                "source_area_mm2": round(float(part.source_area_mm2), 4),
+                "selection_gain": round(
+                    float(part.metadata.get("selection_gain", part.source_area_mm2)), 4
+                ),
+                "stack_group_id": str(part.metadata.get("stack_group_id", "")),
+                "stack_layer_offset_mm": round(
+                    float(part.metadata.get("stack_layer_offset_mm", 0.0)), 4
+                ),
+            }
+        )
+        total_area += area
+        total_perimeter += perimeter
+    rows.sort(key=lambda r: str(r.get("part_id", "")))
+    return {
+        "part_count": int(len(parts)),
+        "total_area_mm2": round(float(total_area), 4),
+        "total_perimeter_mm": round(float(total_perimeter), 4),
+        "parts": rows,
+    }
+
+
+def _phase_diagnostics(parts: List[ManufacturingPart], **extra: Any) -> Dict[str, Any]:
+    """Compose rich diagnostics payload for a phase snapshot."""
+    diagnostics: Dict[str, Any] = {
+        "part_geometry": _part_geometry_summary(parts),
+        "plane_overlap": _compute_plane_overlap(parts),
+    }
+    for key, value in extra.items():
+        diagnostics[key] = value
+    return diagnostics
+
+
+def _extract_polygons_from_geometry(geom: Any) -> List[Polygon]:
+    if geom is None or geom.is_empty:
+        return []
+    clean = geom if geom.is_valid else geom.buffer(0)
+    if clean.is_empty:
+        return []
+    if clean.geom_type == "Polygon":
+        return [clean] if clean.area > 1e-6 else []
+    if clean.geom_type == "MultiPolygon":
+        return [g for g in clean.geoms if g.area > 1e-6]
+    if hasattr(clean, "geoms"):
+        return [g for g in clean.geoms if g.geom_type == "Polygon" and g.area > 1e-6]
+    return []
+
+
+def _clip_polygon_half_plane(
+    poly: Polygon, a: float, b: float, c_rhs: float
+) -> List[Polygon]:
+    """Clip polygon to the half-plane a*x + b*y >= c_rhs."""
+    ab_norm = float(math.hypot(a, b))
+    if ab_norm < 1e-9:
+        return []
+
+    line_normal = np.array([a, b], dtype=float) / ab_norm
+    line_dir = np.array([-line_normal[1], line_normal[0]], dtype=float)
+    if abs(a) > abs(b):
+        line_pt = np.array([c_rhs / a, 0.0], dtype=float)
+    else:
+        line_pt = np.array([0.0, c_rhs / b], dtype=float)
+
+    bounds = poly.bounds
+    extent = max(bounds[2] - bounds[0], bounds[3] - bounds[1], 100.0) * 4.0
+    p1 = line_pt - extent * line_dir
+    p2 = line_pt + extent * line_dir
+    p3 = p2 + extent * line_normal
+    p4 = p1 + extent * line_normal
+    half_plane = Polygon([tuple(p1), tuple(p2), tuple(p3), tuple(p4)])
+    try:
+        clipped = poly.intersection(half_plane)
+    except Exception:
+        return []
+    return _extract_polygons_from_geometry(clipped)
+
+
+def _clip_polygon_strip(
+    poly: Polygon,
+    a: float,
+    b: float,
+    c0: float,
+    lo: float,
+    hi: float,
+) -> List[Polygon]:
+    """Clip polygon to strip lo <= a*x + b*y + c0 <= hi."""
+    if hi <= lo:
+        return []
+    first = _clip_polygon_half_plane(poly, a, b, lo - c0)
+    if not first:
+        return []
+    result: List[Polygon] = []
+    for p in first:
+        result.extend(_clip_polygon_half_plane(p, -a, -b, c0 - hi))
+    return result
+
+
+def _directional_overlap_regions(
+    src_part: ManufacturingPart,
+    dst_part: ManufacturingPart,
+    overlap_mm: float,
+) -> List[Dict[str, Any]]:
+    """Compute overlap-region polygons on src_part where it intrudes dst_part slab."""
+    if overlap_mm <= 0.01:
+        return []
+    prof_src = src_part.profile
+    prof_dst = dst_part.profile
+    if (
+        prof_src.basis_u is None
+        or prof_src.basis_v is None
+        or prof_src.origin_3d is None
+        or prof_dst.origin_3d is None
+    ):
+        return []
+
+    # Use net_polygon (outline minus cutouts) so slot voids are excluded
+    src_outline = prof_src.net_polygon()
+    if src_outline.is_empty or src_outline.area <= 1e-6:
+        return []
+
+    n_dst = _rotation_to_normal(dst_part.rotation_3d)
+    a = float(np.dot(n_dst, prof_src.basis_u))
+    b = float(np.dot(n_dst, prof_src.basis_v))
+    if math.hypot(a, b) < 1e-9:
+        return []
+
+    # Slab origin = outward-facing face (position_3d + normal * thickness).
+    # Material extends in anti-normal direction per _slab_penetration convention.
+    # For stacked parts, position_3d differs per layer (unlike origin_3d).
+    dst_slab_origin = np.asarray(dst_part.position_3d, dtype=float) + n_dst * dst_part.thickness_mm
+    d_surface = float(np.dot(n_dst, dst_slab_origin))
+    c0 = float(np.dot(n_dst, prof_src.origin_3d) - d_surface)
+    tol = _SLAB_INTERIOR_TOL
+    lo = -float(dst_part.thickness_mm) + tol
+    hi = -tol
+    clipped_polys = _clip_polygon_strip(src_outline, a, b, c0, lo, hi)
+    if not clipped_polys:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for poly in clipped_polys:
+        if poly.is_empty or poly.area <= 1e-6:
+            continue
+        ext2 = [
+            [round(float(u), 4), round(float(v), 4)] for u, v in poly.exterior.coords
+        ]
+        ext3 = []
+        for u, v in poly.exterior.coords:
+            p3 = prof_src.project_2d_to_3d(float(u), float(v))
+            ext3.append(
+                [round(float(p3[0]), 4), round(float(p3[1]), 4), round(float(p3[2]), 4)]
+            )
+        holes2: List[List[List[float]]] = []
+        for ring in poly.interiors:
+            holes2.append(
+                [[round(float(u), 4), round(float(v), 4)] for u, v in ring.coords]
+            )
+        out.append(
+            {
+                "part_id": src_part.part_id,
+                "against_part_id": dst_part.part_id,
+                "overlap_mm": round(float(overlap_mm), 4),
+                "area_mm2": round(float(poly.area), 4),
+                "outline_2d": ext2,
+                "outline_3d": ext3,
+                "holes_2d": holes2,
+            }
+        )
+    return out
+
+
+def _slab_penetration(
+    prof: "PartProfile2D",
+    slab_normal: np.ndarray,
+    slab_origin: np.ndarray,
+    slab_thickness: float,
+) -> float:
+    """Return how far *prof*'s outline extends into a material slab.
+
+    The slab surface is at ``dot(slab_normal, slab_origin)`` and material
+    extends in the anti-normal direction by *slab_thickness*.
+
+    Only vertices clearly in the **interior** of the slab are counted
+    (at least ``_SLAB_INTERIOR_TOL`` from both the surface and far face).
+    This avoids false positives from perpendicular parts whose edges
+    naturally sit at the slab boundary.
+    """
+    d_surface = float(np.dot(slab_normal, slab_origin))
+    coords = list(prof.outline.exterior.coords)
+    if not coords:
+        return 0.0
+
+    # Evaluate signed distances over the outline. A linear field over a connected
+    # polygon produces a continuous distance interval, so range overlap catches
+    # edge crossings even when no vertex lies inside the slab interior.
+    d_vals: List[float] = []
+    for u, v in coords:
+        pt3d = prof.project_2d_to_3d(u, v)
+        d_vals.append(float(np.dot(slab_normal, pt3d)) - d_surface)
+    d_min = min(d_vals)
+    d_max = max(d_vals)
+
+    tol = _SLAB_INTERIOR_TOL
+    interior_lo = -slab_thickness + tol
+    interior_hi = -tol
+
+    overlap_lo = max(d_min, interior_lo)
+    overlap_hi = min(d_max, interior_hi)
+    if overlap_hi <= overlap_lo:
+        return 0.0
+
+    # Penetration is maximal at slab mid-plane when reachable.
+    center = -0.5 * slab_thickness
+    d_star = min(max(center, overlap_lo), overlap_hi)
+    return max(0.0, min(-d_star, slab_thickness + d_star))
+
+
+def _compute_plane_overlap(
+    parts: List[ManufacturingPart],
+    joints: Optional[List[JointSpec]] = None,
+) -> Dict[str, Any]:
+    """Measure how much parts physically penetrate each other's material slabs.
+
+    For every pair of non-parallel parts, project outline vertices of each into
+    the other's plane and check if they lie inside the material slab.
+
+    Cutout-aware: after slab penetration is detected, overlap regions are
+    computed using the source outline (which includes slot cutouts), so
+    tab-through-slot junctions produce near-zero overlap area and are
+    filtered out by the area gate.
+
+    Returns a dict of overlap metrics suitable for merging into the debug dict.
+    """
+    overlap_pairs = 0
+    overlap_max_mm = 0.0
+    overlap_total_mm = 0.0
+    pairs_checked = 0
+    overlap_details: List[Dict[str, Any]] = []
+    overlap_regions: List[Dict[str, Any]] = []
+
+    for idx_a in range(len(parts)):
+        pa = parts[idx_a]
+        prof_a = pa.profile
+        if prof_a.basis_u is None or prof_a.basis_v is None or prof_a.origin_3d is None:
+            continue
+        n_a = _rotation_to_normal(pa.rotation_3d)
+        # Slab origin = outward-facing face (position_3d + normal * thickness).
+        # Material extends in anti-normal direction per _slab_penetration convention.
+        slab_origin_a = np.asarray(pa.position_3d, dtype=float) + n_a * pa.thickness_mm
+
+        for idx_b in range(idx_a + 1, len(parts)):
+            pb = parts[idx_b]
+            prof_b = pb.profile
+            if (
+                prof_b.basis_u is None
+                or prof_b.basis_v is None
+                or prof_b.origin_3d is None
+            ):
+                continue
+            n_b = _rotation_to_normal(pb.rotation_3d)
+            slab_origin_b = np.asarray(pb.position_3d, dtype=float) + n_b * pb.thickness_mm
+
+            cross_norm = float(np.linalg.norm(np.cross(n_a, n_b)))
+            if cross_norm < 0.1:
+                continue  # Nearly parallel — skip
+
+            pairs_checked += 1
+            # Require mutual slab intrusion. One-way intrusion often happens at
+            # legitimate face contacts (e.g., butt joints) and should not count
+            # as volumetric overlap.
+            pen_a_into_b = _slab_penetration(
+                prof_a,
+                n_b,
+                slab_origin_b,
+                pb.thickness_mm,
+            )
+            pen_b_into_a = _slab_penetration(
+                prof_b,
+                n_a,
+                slab_origin_a,
+                pa.thickness_mm,
+            )
+            pair_max = min(pen_a_into_b, pen_b_into_a)
+
+            if pair_max > 0.01:  # 0.01mm tolerance
+                # Compute cutout-aware overlap regions and check total area.
+                # Tab-through-slot leaves near-zero area after cutout subtraction.
+                regions_a = _directional_overlap_regions(pa, pb, pair_max)
+                regions_b = _directional_overlap_regions(pb, pa, pair_max)
+                total_area = sum(
+                    r.get("area_mm2", 0.0) for r in regions_a + regions_b
+                )
+                if total_area < 1.0:
+                    # Tab-through-slot or negligible overlap after cutout subtraction
+                    continue
+                overlap_pairs += 1
+                overlap_total_mm += pair_max
+                overlap_details.append(
+                    {
+                        "part_a": pa.part_id,
+                        "part_b": pb.part_id,
+                        "penetration_a_into_b_mm": round(float(pen_a_into_b), 4),
+                        "penetration_b_into_a_mm": round(float(pen_b_into_a), 4),
+                        "overlap_mm": round(float(pair_max), 4),
+                    }
+                )
+                overlap_regions.extend(regions_a)
+                overlap_regions.extend(regions_b)
+            if pair_max > overlap_max_mm:
+                overlap_max_mm = pair_max
+
+    overlap_details.sort(key=lambda item: float(item["overlap_mm"]), reverse=True)
+    overlap_regions.sort(
+        key=lambda item: float(item.get("area_mm2", 0.0)),
+        reverse=True,
+    )
+
+    return {
+        "plane_overlap_pairs": overlap_pairs,
+        "plane_overlap_max_mm": round(float(overlap_max_mm), 4),
+        "plane_overlap_total_mm": round(float(overlap_total_mm), 4),
+        "plane_overlap_count": pairs_checked,
+        "plane_overlap_details": overlap_details,
+        "plane_overlap_regions": overlap_regions,
+    }
+
+
+_POST_JOINT_MAX_TRIM_LOSS = 0.15  # Don't trim more than 15% in safety-net pass
+
+
+def _post_joint_overlap_cleanup(
+    parts: List[ManufacturingPart],
+    joints: List[JointSpec],
+) -> List[ManufacturingPart]:
+    """Bounded post-joint cleanup: trim residual real overlaps after joint geometry.
+
+    Single pass, no iteration. Skips pairs that share a joint. Only applies
+    the lower-loss trim direction if loss < _POST_JOINT_MAX_TRIM_LOSS.
+    """
+    # Build set of joint-connected part_id pairs
+    joint_pairs_ids = set()
+    for j in joints:
+        pair = tuple(sorted([j.part_a, j.part_b]))
+        joint_pairs_ids.add(pair)
+
+    id_to_idx = {p.part_id: idx for idx, p in enumerate(parts)}
+
+    for idx_a in range(len(parts)):
+        pa = parts[idx_a]
+        if pa.profile.basis_u is None:
+            continue
+        n_a = _rotation_to_normal(pa.rotation_3d)
+        for idx_b in range(idx_a + 1, len(parts)):
+            pb = parts[idx_b]
+            if pb.profile.basis_u is None:
+                continue
+
+            # Skip pairs that share a joint (tab-through-slot is expected)
+            pair_ids = tuple(sorted([pa.part_id, pb.part_id]))
+            if pair_ids in joint_pairs_ids:
+                continue
+
+            n_b = _rotation_to_normal(pb.rotation_3d)
+            cross_norm = float(np.linalg.norm(np.cross(n_a, n_b)))
+            if cross_norm < 0.1:
+                continue
+
+            slab_origin_a = np.asarray(pa.position_3d, dtype=float) + n_a * pa.thickness_mm
+            slab_origin_b = np.asarray(pb.position_3d, dtype=float) + n_b * pb.thickness_mm
+            pen_a = _slab_penetration(
+                pa.profile, n_b, slab_origin_b, pb.thickness_mm,
+            )
+            pen_b = _slab_penetration(
+                pb.profile, n_a, slab_origin_a, pa.thickness_mm,
+            )
+            pair_max = min(pen_a, pen_b)
+            if pair_max <= 0.01:
+                continue
+
+            # Check cutout-aware area
+            regions_a = _directional_overlap_regions(pa, pb, pair_max)
+            regions_b = _directional_overlap_regions(pb, pa, pair_max)
+            total_area = sum(
+                r.get("area_mm2", 0.0) for r in regions_a + regions_b
+            )
+            if total_area < 1.0:
+                continue
+
+            # Try both trim directions, pick the lower-loss one
+            loss_a = _trim_loss_fraction(pa, n_b, slab_origin_b, pb.thickness_mm)
+            loss_b = _trim_loss_fraction(pb, n_a, slab_origin_a, pa.thickness_mm)
+            if loss_a <= loss_b and loss_a < _POST_JOINT_MAX_TRIM_LOSS:
+                _trim_part_against_plane(pa, n_b, slab_origin_b, pb.thickness_mm)
+            elif loss_b < _POST_JOINT_MAX_TRIM_LOSS:
+                _trim_part_against_plane(pb, n_a, slab_origin_a, pa.thickness_mm)
+            # else: both losses too high, skip
+
+    return parts
+
+
 def _compute_quality_metrics(
     mesh: trimesh.Trimesh,
     selected_parts: List[ManufacturingPart],
     joints: List[JointSpec],
     part_budget_max: int,
     fidelity_weight: float,
-    seam_weight: float,
-    assembly_weight: float,
+    overlap_pairs: int = 0,
+    error_count: int = 0,
 ) -> Step3QualityMetrics:
     if not selected_parts:
         return Step3QualityMetrics(
             hausdorff_mm=1e6,
             mean_distance_mm=1e6,
             normal_error_deg=180.0,
-            seam_penalty=1.0,
-            assembly_penalty=1.0,
+            connectivity_score=0.0,
+            overlap_score=0.0,
+            violation_score=0.0,
             part_count=0,
             overall_score=0.0,
         )
@@ -1978,35 +3752,44 @@ def _compute_quality_metrics(
 
     normal_error_deg = _compute_normal_error_deg(mesh, selected_parts)
 
-    effective_members = _effective_member_count(selected_parts)
-    seam_penalty = max(0.0, (effective_members - 1) / max(1, part_budget_max))
-    assembly_penalty = max(0.0, len(joints) / max(1, len(selected_parts) * 3))
+    # --- Sub-scores, all in [0, 1], higher = better ---
 
     hausdorff_score = 1.0 / (1.0 + hausdorff_mm / max(1.0, max_extent))
     normal_score = 1.0 / (1.0 + normal_error_deg / 45.0)
-    seam_score = max(0.0, 1.0 - seam_penalty)
-    assembly_score = max(0.0, 1.0 - assembly_penalty)
+    fidelity_score = 0.8 * hausdorff_score + 0.2 * normal_score
 
+    # Connectivity: a spanning tree of N members needs N-1 joints.
+    effective_members = _effective_member_count(selected_parts)
+    expected_joints = max(1, effective_members - 1)
+    connectivity_score = min(1.0, len(joints) / expected_joints)
+
+    # Overlap: each overlap pair indicates physical impossibility.
+    overlap_score = 1.0 / (1.0 + overlap_pairs)
+
+    # Violations: each error-severity violation is a manufacturing problem.
+    violation_score = 1.0 / (1.0 + error_count)
+
+    # --- Weighted combination ---
+    # Remainder after fidelity is split: 40% connectivity, 40% overlap, 20% violations
     remainder = max(1e-6, 1.0 - fidelity_weight)
-    seam_component = remainder * (
-        seam_weight / max(1e-6, seam_weight + assembly_weight)
-    )
-    asm_component = remainder * (
-        assembly_weight / max(1e-6, seam_weight + assembly_weight)
-    )
+    connectivity_w = remainder * 0.40
+    overlap_w = remainder * 0.40
+    violation_w = remainder * 0.20
 
     overall = (
-        fidelity_weight * (0.8 * hausdorff_score + 0.2 * normal_score)
-        + seam_component * seam_score
-        + asm_component * assembly_score
+        fidelity_weight * fidelity_score
+        + connectivity_w * connectivity_score
+        + overlap_w * overlap_score
+        + violation_w * violation_score
     )
 
     return Step3QualityMetrics(
         hausdorff_mm=float(hausdorff_mm),
         mean_distance_mm=float(mean_distance_mm),
         normal_error_deg=float(normal_error_deg),
-        seam_penalty=float(seam_penalty),
-        assembly_penalty=float(assembly_penalty),
+        connectivity_score=float(connectivity_score),
+        overlap_score=float(overlap_score),
+        violation_score=float(violation_score),
         part_count=len(selected_parts),
         overall_score=float(np.clip(overall, 0.0, 1.0)),
     )
@@ -2121,8 +3904,9 @@ def _empty_output(
             hausdorff_mm=1e6,
             mean_distance_mm=1e6,
             normal_error_deg=180.0,
-            seam_penalty=1.0,
-            assembly_penalty=1.0,
+            connectivity_score=0.0,
+            overlap_score=0.0,
+            violation_score=0.0,
             part_count=0,
             overall_score=0.0,
         ),
@@ -2185,6 +3969,7 @@ def _constrain_outlines(
     parts: List[ManufacturingPart],
     mesh: trimesh.Trimesh,
     input_spec: Step3Input,
+    joint_pairs: Optional[Set[Tuple[int, int]]] = None,
 ) -> Tuple[List[ManufacturingPart], List[dict]]:
     """Grow-then-constrain: expand outlines freely, clip by planes, clip by mesh."""
     snapshots: List[dict] = []
@@ -2199,7 +3984,11 @@ def _constrain_outlines(
             continue
 
         profile = part.profile
-        if profile.basis_u is None or profile.basis_v is None or profile.origin_3d is None:
+        if (
+            profile.basis_u is None
+            or profile.basis_v is None
+            or profile.origin_3d is None
+        ):
             grown.append(part)
             continue
 
@@ -2210,9 +3999,7 @@ def _constrain_outlines(
 
         # Grow outward but preserve holes: expand the exterior using the
         # grown extent, then re-punch the original interior rings.
-        new_exterior = unary_union(
-            [Polygon(profile.outline.exterior), grown_outline]
-        )
+        new_exterior = unary_union([Polygon(profile.outline.exterior), grown_outline])
         if not isinstance(new_exterior, Polygon):
             new_exterior = _largest_polygon(new_exterior)
         if new_exterior is None or new_exterior.is_empty:
@@ -2259,18 +4046,41 @@ def _constrain_outlines(
             )
         )
 
-    snapshots.append(_serialize_parts_snapshot("Grown (coplanar)", 1, grown))
+    snapshots.append(
+        _serialize_parts_snapshot(
+            "Grown (coplanar)",
+            1,
+            grown,
+            diagnostics=_phase_diagnostics(grown),
+        )
+    )
 
     # Phase B: trim at plane-plane intersections
-    trimmed = _trim_at_plane_intersections(grown, input_spec)
+    trimmed, trim_debug = _trim_at_plane_intersections(
+        grown, input_spec, joint_pairs=joint_pairs
+    )
 
-    snapshots.append(_serialize_parts_snapshot("Trimmed (planes)", 2, trimmed))
+    snapshots.append(
+        _serialize_parts_snapshot(
+            "Trimmed (planes)",
+            2,
+            trimmed,
+            diagnostics=_phase_diagnostics(trimmed, trim_decisions=trim_debug),
+        )
+    )
 
     # Phase C skipped: Phase A now grows outlines to the mesh cross-section
     # directly, so a redundant mesh clip is no longer needed.
     clipped = trimmed
 
-    snapshots.append(_serialize_parts_snapshot("Clipped (mesh)", 3, clipped))
+    snapshots.append(
+        _serialize_parts_snapshot(
+            "Clipped (mesh)",
+            3,
+            clipped,
+            diagnostics=_phase_diagnostics(clipped),
+        )
+    )
 
     # Phase D: split oversized parts
     max_w = input_spec.scs_capabilities.max_sheet_width_mm
@@ -2294,7 +4104,14 @@ def _constrain_outlines(
             continue
         result.append(part)
 
-    snapshots.append(_serialize_parts_snapshot("Final", 4, result))
+    snapshots.append(
+        _serialize_parts_snapshot(
+            "Final",
+            4,
+            result,
+            diagnostics=_phase_diagnostics(result),
+        )
+    )
 
     return result, snapshots
 
@@ -2457,8 +4274,9 @@ def _deep_copy_part(part: ManufacturingPart) -> ManufacturingPart:
     """Deep-copy a ManufacturingPart so mutations don't affect the original."""
     p = part.profile
     new_profile = PartProfile2D(
-        outline=Polygon(p.outline.exterior.coords,
-                        [list(h.coords) for h in p.outline.interiors]),
+        outline=Polygon(
+            p.outline.exterior.coords, [list(h.coords) for h in p.outline.interiors]
+        ),
         cutouts=list(p.cutouts),
         features=list(p.features),
         material_key=p.material_key,
@@ -2500,10 +4318,12 @@ def _apply_trim_combination(
             pj = copied[j]
             n_i = _rotation_to_normal(pi.rotation_3d)
             n_j = _rotation_to_normal(pj.rotation_3d)
+            slab_origin_i = np.asarray(pi.position_3d, dtype=float) + n_i * pi.thickness_mm
+            slab_origin_j = np.asarray(pj.position_3d, dtype=float) + n_j * pj.thickness_mm
             if mask & (1 << k):
-                _trim_part_against_plane(pi, n_j, pj.profile.origin_3d, pj.thickness_mm)
+                _trim_part_against_plane(pi, n_j, slab_origin_j, pj.thickness_mm)
             else:
-                _trim_part_against_plane(pj, n_i, pi.profile.origin_3d, pi.thickness_mm)
+                _trim_part_against_plane(pj, n_i, slab_origin_i, pi.thickness_mm)
     return copied
 
 
@@ -2527,6 +4347,7 @@ def _trim_loss_fraction(
 
 
 _SIGNIFICANT_TRIM_THRESHOLD = 0.20  # 20 % area loss
+_NEAR_ZERO_TRIM = 1e-4  # Below this, a trim removes no meaningful area
 
 
 def _group_pairs_by_stack(
@@ -2551,7 +4372,8 @@ def _group_pairs_by_stack(
 def _trim_at_plane_intersections(
     parts: List[ManufacturingPart],
     input_spec: Step3Input,
-) -> List[ManufacturingPart]:
+    joint_pairs: Optional[Set[Tuple[int, int]]] = None,
+) -> Tuple[List[ManufacturingPart], Dict[str, Any]]:
     """Trim part outlines at plane-plane intersection boundaries.
 
     Pairs are classified as *significant* (either direction removes >20% of a
@@ -2561,17 +4383,52 @@ def _trim_at_plane_intersections(
     exhaustively over the group mask to maximize total outline area.
     """
     # -- Collect intersecting pairs and classify --
+    trim_debug: Dict[str, Any] = {
+        "significant_trim_threshold": float(_SIGNIFICANT_TRIM_THRESHOLD),
+        "pairs_considered_total": 0,
+        "pairs_skipped_non_planar": 0,
+        "pairs_skipped_missing_basis": 0,
+        "pairs_skipped_parallel": 0,
+        "pair_trials": [],
+        "minor_pairs_count": 0,
+        "significant_pairs_count": 0,
+        "minor_decisions": [],
+        "minor_mask": 0,
+        "significant_group_count": 0,
+        "significant_groups": [],
+        "search_mode": "none",
+        "fallback_used": False,
+        "best_mask": 0,
+        "best_score": 0.0,
+        "combos_evaluated": 0,
+        "joint_aware_pairs": len(joint_pairs) if joint_pairs else 0,
+        "minor_one_zero_count": 0,
+    }
+    if joint_pairs is None:
+        joint_pairs = set()
     minor_pairs: List[Tuple[int, int, float, float]] = []  # (i, j, loss_i, loss_j)
     significant_pairs: List[Tuple[int, int]] = []
 
     for i in range(len(parts)):
         for j in range(i + 1, len(parts)):
+            trim_debug["pairs_considered_total"] = (
+                int(trim_debug["pairs_considered_total"]) + 1
+            )
             pi = parts[i]
             pj = parts[j]
 
-            if pi.region_type != RegionType.PLANAR_CUT or pj.region_type != RegionType.PLANAR_CUT:
+            if (
+                pi.region_type != RegionType.PLANAR_CUT
+                or pj.region_type != RegionType.PLANAR_CUT
+            ):
+                trim_debug["pairs_skipped_non_planar"] = (
+                    int(trim_debug["pairs_skipped_non_planar"]) + 1
+                )
                 continue
             if pi.profile.basis_u is None or pj.profile.basis_u is None:
+                trim_debug["pairs_skipped_missing_basis"] = (
+                    int(trim_debug["pairs_skipped_missing_basis"]) + 1
+                )
                 continue
 
             n_i = _rotation_to_normal(pi.rotation_3d)
@@ -2579,44 +4436,127 @@ def _trim_at_plane_intersections(
 
             cross_norm = float(np.linalg.norm(np.cross(n_i, n_j)))
             if cross_norm < 0.1:
+                trim_debug["pairs_skipped_parallel"] = (
+                    int(trim_debug["pairs_skipped_parallel"]) + 1
+                )
                 continue
 
             # Trial-trim both directions to measure area loss
-            loss_j = _trim_loss_fraction(pj, n_i, pi.profile.origin_3d, pi.thickness_mm)
-            loss_i = _trim_loss_fraction(pi, n_j, pj.profile.origin_3d, pj.thickness_mm)
+            slab_origin_i = np.asarray(pi.position_3d, dtype=float) + n_i * pi.thickness_mm
+            slab_origin_j = np.asarray(pj.position_3d, dtype=float) + n_j * pj.thickness_mm
+            loss_j = _trim_loss_fraction(pj, n_i, slab_origin_i, pi.thickness_mm)
+            loss_i = _trim_loss_fraction(pi, n_j, slab_origin_j, pj.thickness_mm)
+            pair_kind = (
+                "significant"
+                if (
+                    loss_i > _SIGNIFICANT_TRIM_THRESHOLD
+                    or loss_j > _SIGNIFICANT_TRIM_THRESHOLD
+                )
+                else "minor"
+            )
+            trim_debug["pair_trials"].append(
+                {
+                    "part_i": pi.part_id,
+                    "part_j": pj.part_id,
+                    "loss_i": round(float(loss_i), 6),
+                    "loss_j": round(float(loss_j), 6),
+                    "cross_norm": round(float(cross_norm), 6),
+                    "classification": pair_kind,
+                }
+            )
 
-            if loss_i > _SIGNIFICANT_TRIM_THRESHOLD or loss_j > _SIGNIFICANT_TRIM_THRESHOLD:
+            if (
+                loss_i > _SIGNIFICANT_TRIM_THRESHOLD
+                or loss_j > _SIGNIFICANT_TRIM_THRESHOLD
+            ):
                 significant_pairs.append((i, j))
             else:
                 minor_pairs.append((i, j, loss_i, loss_j))
+    trim_debug["minor_pairs_count"] = int(len(minor_pairs))
+    trim_debug["significant_pairs_count"] = int(len(significant_pairs))
 
     if not minor_pairs and not significant_pairs:
-        return parts
+        return parts, trim_debug
 
-    # -- Apply minor pairs: trim the part that loses less (it's more "at its end") --
-    # The part with lower trim loss has the intersection line closer to its edge,
-    # meaning it barely extends past the other part. Trim it so the continuing
-    # part keeps its full extent.  Tie-break on area (larger area wins).
+    # -- Apply minor pairs: trim the part that extends past the other's boundary --
+    # ONE_ZERO fix: when one loss ≈ 0 (no-op trim) and the other > 0, the
+    # non-zero-loss part is the one actually extending past the boundary.
+    # Always trim that part.  For both-nonzero cases, trim the lower-loss
+    # part (it's more "at its end").  Tie-break on area (larger area wins).
     minor_groups = [[(i, j)] for i, j, _, _ in minor_pairs]
     minor_mask = 0
     for k, (i, j, loss_i, loss_j) in enumerate(minor_pairs):
-        if loss_i < loss_j:
+        decision = "trim_j"
+        if loss_j < _NEAR_ZERO_TRIM and loss_i >= _NEAR_ZERO_TRIM:
+            # j doesn't extend past i's boundary; i does → trim i
+            minor_mask |= 1 << k
+            decision = "trim_i_nonzero"
+            trim_debug["minor_one_zero_count"] = (
+                int(trim_debug["minor_one_zero_count"]) + 1
+            )
+        elif loss_i < _NEAR_ZERO_TRIM and loss_j >= _NEAR_ZERO_TRIM:
+            # i doesn't extend past; j does → trim j
+            decision = "trim_j_nonzero"
+            trim_debug["minor_one_zero_count"] = (
+                int(trim_debug["minor_one_zero_count"]) + 1
+            )
+        elif loss_i < loss_j:
             # Part i loses less → i is more at its end → trim i
             minor_mask |= 1 << k
+            decision = "trim_i"
         elif loss_i == loss_j:
             # Tie: trim the smaller-area part
             if parts[i].profile.outline.area < parts[j].profile.outline.area:
                 minor_mask |= 1 << k
-        # else: loss_j < loss_i → trim j → bit stays 0
+                decision = "trim_i"
+            else:
+                decision = "trim_j_tie"
+        else:
+            decision = "trim_j"
+        trim_debug["minor_decisions"].append(
+            {
+                "group_index": int(k),
+                "part_i": parts[i].part_id,
+                "part_j": parts[j].part_id,
+                "loss_i": round(float(loss_i), 6),
+                "loss_j": round(float(loss_j), 6),
+                "decision": decision,
+                "mask_bit": int((minor_mask >> k) & 1),
+            }
+        )
+    trim_debug["minor_mask"] = int(minor_mask)
     if minor_groups:
         parts = _apply_trim_combination(parts, minor_groups, minor_mask)
 
     if not significant_pairs:
-        return parts
+        trim_debug["search_mode"] = "minor_only"
+        trim_debug["best_mask"] = int(minor_mask)
+        trim_debug["best_score"] = 0.0
+        return parts, trim_debug
 
     # -- Group significant pairs by stack membership --
     sig_groups = _group_pairs_by_stack(significant_pairs, parts)
     n_groups = len(sig_groups)
+    trim_debug["significant_group_count"] = int(n_groups)
+    sig_group_rows: List[Dict[str, Any]] = []
+    for k, group in enumerate(sig_groups):
+        i0, j0 = group[0]
+        sg_i = str(parts[i0].metadata.get("stack_group_id", f"_solo_{i0}"))
+        sg_j = str(parts[j0].metadata.get("stack_group_id", f"_solo_{j0}"))
+        sig_group_rows.append(
+            {
+                "group_index": int(k),
+                "stack_key": [sg_i, sg_j],
+                "pairs": [
+                    {
+                        "part_i": parts[i].part_id,
+                        "part_j": parts[j].part_id,
+                    }
+                    for i, j in group
+                ],
+            }
+        )
+    trim_debug["significant_groups"] = sig_group_rows
 
     # -- Safety valve on GROUP count (not raw pair count) --
     if n_groups > 16:
@@ -2627,7 +4567,12 @@ def _trim_at_plane_intersections(
             area_j = parts[j].source_area_mm2
             if area_i < area_j:
                 fallback_mask |= 1 << k
-        return _apply_trim_combination(parts, sig_groups, fallback_mask)
+        trim_debug["search_mode"] = "significant_fallback"
+        trim_debug["fallback_used"] = True
+        trim_debug["best_mask"] = int(fallback_mask)
+        trim_debug["best_score"] = 0.0
+        trim_debug["combos_evaluated"] = 0
+        return _apply_trim_combination(parts, sig_groups, fallback_mask), trim_debug
 
     # -- Exhaustive search over group bits --
     # Score rewards useful area (capped at source geometry) and penalizes
@@ -2647,8 +4592,11 @@ def _trim_at_plane_intersections(
         if score > best_score:
             best_score = score
             best_mask = mask
-
-    return _apply_trim_combination(parts, sig_groups, best_mask)
+    trim_debug["search_mode"] = "significant_exhaustive"
+    trim_debug["best_mask"] = int(best_mask)
+    trim_debug["best_score"] = float(best_score)
+    trim_debug["combos_evaluated"] = int(n_combos)
+    return _apply_trim_combination(parts, sig_groups, best_mask), trim_debug
 
 
 def _trim_part_against_plane(
@@ -2662,9 +4610,12 @@ def _trim_part_against_plane(
     Uses the half-plane inequality: n_other . (origin + u*x + v*y) >= d_other
     which becomes a*x + b*y >= c in the part's 2D frame.
 
-    The cutting plane is offset inward by other_thickness_mm so that the
-    trimmed part butts against the inner face of the winning part, preventing
-    physical overlap of material volumes.
+    The cutting plane is offset to the *nearest* face of the winning part's
+    material slab.  The slab occupies [d_surface - thickness, d_surface] along
+    the other normal.  When the trimmed part sits on the normal side
+    (d_trimmed >= d_surface) the nearest face is the surface itself; when it
+    sits on the anti-normal side the nearest face is the far face at
+    d_surface - thickness.
     """
     profile = part.profile
     if profile.basis_u is None or profile.basis_v is None or profile.origin_3d is None:
@@ -2672,10 +4623,15 @@ def _trim_part_against_plane(
 
     a = float(np.dot(other_normal, profile.basis_u))
     b = float(np.dot(other_normal, profile.basis_v))
-    # Offset the cutting plane inward by the winning part's thickness.
-    # The part surface is at d_other; material extends inward (against normal)
-    # by thickness_mm, so the inner face is at d_other - thickness.
-    d_other = float(np.dot(other_normal, other_origin)) - other_thickness_mm
+    # Determine which face of the winning slab is closest to the trimmed part.
+    d_surface = float(np.dot(other_normal, other_origin))
+    trimmed_d = float(np.dot(other_normal, profile.origin_3d))
+    if trimmed_d >= d_surface:
+        # Trimmed part on normal side → nearest face is the surface
+        d_other = d_surface
+    else:
+        # Trimmed part on anti-normal side → nearest face is the far face
+        d_other = d_surface - other_thickness_mm
     c = d_other - float(np.dot(other_normal, profile.origin_3d))
 
     ab_norm = math.sqrt(a * a + b * b)

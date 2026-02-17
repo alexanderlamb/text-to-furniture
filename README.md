@@ -87,7 +87,9 @@ Each pipeline run writes:
 runs/<run_id>/
   input/<mesh>
   artifacts/
+    debug_trace.json
     design_first_principles.json
+    snapshots/phase_*.json
     svg/
     dxf/
   manifest.json
@@ -96,6 +98,38 @@ runs/<run_id>/
 ```
 
 Suite runs aggregate under `runs/suites/<suite_run_id>/` with `results.json`, `results.csv`, and `summary.md`.
+
+## Agent Debug Data
+
+If you are feeding run output back to a coding agent, use these files first:
+
+1. `runs/<run_id>/metrics.json`
+2. `runs/<run_id>/artifacts/debug_trace.json`
+3. `runs/<run_id>/artifacts/snapshots/phase_*.json`
+4. `runs/<run_id>/artifacts/design_first_principles.json`
+5. `runs/suites/<suite_run_id>/results.csv` (suite-level summaries)
+
+Tracked overlap/trim/intersection signals:
+
+- `metrics.json -> debug.plane_overlap_*` (final overlap metrics + details)
+- `metrics.json -> debug.plane_overlap_regions` (explicit overlap region polygons)
+- `metrics.json -> debug.step2_plane_overlap_*` (Step 2 overlap metrics)
+- `metrics.json -> debug.step2_plane_overlap_regions` (Step 2 overlap regions)
+- `metrics.json -> debug.step2_trim_debug` (Step 2 trim search + decisions)
+- `metrics.json -> debug.intersection_events` (pairwise intersection filter actions)
+- `metrics.json -> debug.intersection_part_decisions` (kept/dropped candidate decisions)
+- `artifacts/debug_trace.json -> phase_diagnostics[*].diagnostics.*` (per-phase machine-readable debug)
+- `results.csv` columns:
+  - `plane_overlap_pairs`
+  - `plane_overlap_region_count`
+  - `plane_overlap_total_mm`
+  - `step2_plane_overlap_pairs`
+  - `step2_plane_overlap_region_count`
+  - `step2_trim_search_mode`
+  - `step2_trim_minor_pairs_count`
+  - `step2_trim_significant_pairs_count`
+
+See `notes/debug_artifacts.md` for field-level details.
 
 ## Scripts
 

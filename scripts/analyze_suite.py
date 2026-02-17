@@ -66,20 +66,36 @@ def print_summary(suite_dir: Path) -> None:
         s = str(r.get("status", "unknown")).lower()
         statuses[s] = statuses.get(s, 0) + 1
 
-    scores = [r["overall_score"] for r in rows if isinstance(r.get("overall_score"), (int, float))]
-    hausdorffs = [r["hausdorff_mm"] for r in rows if isinstance(r.get("hausdorff_mm"), (int, float))]
+    scores = [
+        r["overall_score"]
+        for r in rows
+        if isinstance(r.get("overall_score"), (int, float))
+    ]
+    hausdorffs = [
+        r["hausdorff_mm"]
+        for r in rows
+        if isinstance(r.get("hausdorff_mm"), (int, float))
+    ]
 
     print(f"=== Suite: {suite_id} ===")
     print(f"Cases: {len(rows)}")
-    print(f"Status breakdown: {', '.join(f'{k}={v}' for k, v in sorted(statuses.items()))}")
+    print(
+        f"Status breakdown: {', '.join(f'{k}={v}' for k, v in sorted(statuses.items()))}"
+    )
     if scores:
-        print(f"Scores: mean={sum(scores)/len(scores):.3f}, min={min(scores):.3f}, max={max(scores):.3f}")
+        print(
+            f"Scores: mean={sum(scores)/len(scores):.3f}, min={min(scores):.3f}, max={max(scores):.3f}"
+        )
     if hausdorffs:
-        print(f"Hausdorff (mm): mean={sum(hausdorffs)/len(hausdorffs):.1f}, max={max(hausdorffs):.1f}")
+        print(
+            f"Hausdorff (mm): mean={sum(hausdorffs)/len(hausdorffs):.1f}, max={max(hausdorffs):.1f}"
+        )
     print()
 
     # Per-case table
-    print(f"{'case_id':<30} {'status':<10} {'score':>7} {'parts':>5} {'errs':>5} {'failure_mode'}")
+    print(
+        f"{'case_id':<30} {'status':<10} {'score':>7} {'parts':>5} {'errs':>5} {'failure_mode'}"
+    )
     print("-" * 90)
     for r in rows:
         print(
@@ -118,7 +134,13 @@ def print_summary(suite_dir: Path) -> None:
     # Cases that need attention (non-success, sorted by score ascending)
     problem_cases = [r for r in rows if str(r.get("status", "")).lower() != "success"]
     if problem_cases:
-        problem_cases.sort(key=lambda r: r.get("overall_score") if isinstance(r.get("overall_score"), (int, float)) else -1)
+        problem_cases.sort(
+            key=lambda r: (
+                r.get("overall_score")
+                if isinstance(r.get("overall_score"), (int, float))
+                else -1
+            )
+        )
         print("Priority cases (worst first):")
         for r in problem_cases:
             case_id = r.get("case_id", "")
@@ -132,8 +154,20 @@ def print_summary(suite_dir: Path) -> None:
             # Show key debug metrics
             coverage = r.get("coverage_ratio_unique_faces")
             dropped = r.get("intersection_dropped_count", 0)
+            overlap = r.get("plane_overlap_max_mm")
+            step2_overlap = r.get("step2_plane_overlap_max_mm")
+            step2_mode = str(r.get("step2_trim_search_mode", "") or "")
             if coverage is not None:
-                print(f"    coverage={_fmt(coverage)}, intersection_dropped={dropped}")
+                extra = ""
+                if overlap is not None and float(overlap) > 0:
+                    extra = f", plane_overlap_max={_fmt(overlap, '.2f')}mm"
+                if step2_overlap is not None and float(step2_overlap) > 0:
+                    extra += f", step2_overlap_max={_fmt(step2_overlap, '.2f')}mm"
+                if step2_mode:
+                    extra += f", step2_trim_mode={step2_mode}"
+                print(
+                    f"    coverage={_fmt(coverage)}, intersection_dropped={dropped}{extra}"
+                )
         print()
 
 
@@ -156,7 +190,9 @@ def print_comparison(suites_dir: Path) -> None:
 
     print(f"=== Comparison: {current_dir.name} vs {previous_dir.name} ===")
     print()
-    print(f"{'case_id':<30} {'prev_score':>10} {'curr_score':>10} {'delta':>8} {'status_change'}")
+    print(
+        f"{'case_id':<30} {'prev_score':>10} {'curr_score':>10} {'delta':>8} {'status_change'}"
+    )
     print("-" * 80)
 
     common = sorted(set(cur_rows.keys()) & set(prev_rows.keys()))
@@ -172,7 +208,9 @@ def print_comparison(suites_dir: Path) -> None:
         status_change = ""
         if str(cr.get("status")) != str(pr.get("status")):
             status_change = f"{pr.get('status')} → {cr.get('status')}"
-        print(f"{case_id:<30} {_fmt(ps):>10} {_fmt(cs):>10} {delta_str:>8} {status_change}")
+        print(
+            f"{case_id:<30} {_fmt(ps):>10} {_fmt(cs):>10} {delta_str:>8} {status_change}"
+        )
 
     new_cases = sorted(set(cur_rows.keys()) - set(prev_rows.keys()))
     if new_cases:
@@ -185,9 +223,13 @@ def print_comparison(suites_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze suite results")
-    parser.add_argument("--suite-dir", default=None, help="Specific suite run directory")
+    parser.add_argument(
+        "--suite-dir", default=None, help="Specific suite run directory"
+    )
     parser.add_argument("--suites-dir", default=str(DEFAULT_SUITES_DIR))
-    parser.add_argument("--compare", action="store_true", help="Compare latest vs previous")
+    parser.add_argument(
+        "--compare", action="store_true", help="Compare latest vs previous"
+    )
     args = parser.parse_args()
 
     suites_dir = Path(args.suites_dir)
