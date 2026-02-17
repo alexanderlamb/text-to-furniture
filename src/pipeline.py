@@ -84,13 +84,49 @@ def run_pipeline_from_mesh(
 
     # Write phase snapshots for step-through debugging
     phase_snapshots = step3.debug.get("phase_snapshots", [])
+    snapshot_paths: List[str] = []
     if phase_snapshots:
         snapshots_dir = paths.artifacts_dir / "snapshots"
         snapshots_dir.mkdir(parents=True, exist_ok=True)
         for snap in phase_snapshots:
-            label_slug = snap["phase_label"].lower().replace(" ", "_").replace("(", "").replace(")", "")
+            label_slug = (
+                snap["phase_label"]
+                .lower()
+                .replace(" ", "_")
+                .replace("(", "")
+                .replace(")", "")
+            )
             fname = f"phase_{snap['phase_index']:02d}_{label_slug}.json"
-            write_json(snapshots_dir / fname, snap)
+            snap_path = snapshots_dir / fname
+            write_json(snap_path, snap)
+            snapshot_paths.append(str(snap_path))
+
+    # Compact machine-readable debug trace for agents/tools.
+    debug_trace_path = paths.artifacts_dir / "debug_trace.json"
+    phase_diagnostics = []
+    if isinstance(phase_snapshots, list):
+        for snap in phase_snapshots:
+            if not isinstance(snap, dict):
+                continue
+            phase_diagnostics.append(
+                {
+                    "phase_index": snap.get("phase_index"),
+                    "phase_label": snap.get("phase_label"),
+                    "part_count": snap.get("part_count"),
+                    "diagnostics": snap.get("diagnostics", {}),
+                }
+            )
+    write_json(
+        debug_trace_path,
+        {
+            "run_id": paths.run_id,
+            "phase_snapshot_paths": snapshot_paths,
+            "phase_diagnostics": phase_diagnostics,
+            "step3_debug": {
+                k: v for k, v in step3.debug.items() if k != "phase_snapshots"
+            },
+        },
+    )
 
     svg_paths: List[str] = []
     nested_svg_path = None
@@ -164,6 +200,8 @@ def run_pipeline_from_mesh(
             "design_json": str(design_json_path),
             "metrics": str(paths.metrics_path),
             "summary": str(paths.summary_path),
+            "debug_trace": str(debug_trace_path),
+            "phase_snapshots": snapshot_paths,
             "svg": svg_paths,
             "nested_svg": nested_svg_path,
             "dxf": dxf_paths,

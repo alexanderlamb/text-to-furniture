@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import trimesh
 from shapely.geometry import Polygon
 
 from geometry_primitives import PartProfile2D
@@ -8,9 +9,15 @@ from step3_first_principles import (
     ManufacturingPart,
     RegionType,
     _RegionCandidate,
+    _classify_face_exterior,
     _collapse_planar_face_pairs,
+    _compute_plane_overlap,
+    _identify_joint_contact_pairs,
     _select_candidates,
+    _stack_layer_offsets_mm,
     _synthesize_joint_specs,
+    _trim_at_plane_intersections,
+    _trim_part_against_plane,
     Step3Input,
     build_default_capability_profile,
     decompose_first_principles,
@@ -105,7 +112,9 @@ def test_collapse_planar_face_pairs_merges_opposites():
     merged, pair_count = _collapse_planar_face_pairs([a, b, c])
     assert pair_count == 1
     assert len(merged) == 2
-    merged_pair = next(m for m in merged if m.metadata.get("kind") == "merged_facet_pair")
+    merged_pair = next(
+        m for m in merged if m.metadata.get("kind") == "merged_facet_pair"
+    )
     assert merged_pair.metadata.get("member_thickness_mm") == 6.0
 
 
@@ -396,10 +405,14 @@ def test_select_candidates_reports_constraint_difficulty_metrics():
     assert 0.0 < debug["mesh_constraint_pressure_mean"] <= 1.0
     assert 0.0 < debug["intersection_constraint_pressure_mean"] <= 1.0
     assert 0.0 < debug["plane_constraint_difficulty_mean"] <= 1.0
-    assert debug["plane_constraint_difficulty_max"] >= debug["plane_constraint_difficulty_mean"]
+    assert (
+        debug["plane_constraint_difficulty_max"]
+        >= debug["plane_constraint_difficulty_mean"]
+    )
     assert len(debug["constraint_difficulty_parts"]) == 2
     assert all(
-        "plane_constraint_difficulty" in p.metadata and "mesh_constraint_pressure" in p.metadata
+        "plane_constraint_difficulty" in p.metadata
+        and "mesh_constraint_pressure" in p.metadata
         for p in parts
     )
 
@@ -481,3 +494,556 @@ def test_synthesize_joint_specs_skips_parallel_contact_pairs():
         parallel_dot_threshold=0.95,
     )
     assert joints == []
+
+
+# --- Exterior-flush stack alignment tests ---
+
+
+def test_classify_face_exterior_on_box():
+    """Faces of a trimesh box with outward normals should classify as exterior."""
+    mesh = trimesh.creation.box(extents=[100, 80, 60])
+    mesh.fix_normals()
+    # Test each unique face normal direction of the box
+    for face_idx in range(len(mesh.faces)):
+        centroid = mesh.triangles_center[face_idx]
+        normal = mesh.face_normals[face_idx]
+        assert _classify_face_exterior(
+            mesh, centroid, normal
+        ), f"Face {face_idx} with normal {normal} should be exterior"
+
+
+def test_collapse_pairs_without_mesh_defaults_centered():
+    """Calling _collapse_planar_face_pairs without mesh gives centered alignment."""
+    profile = PartProfile2D(outline=Polygon([(0, 0), (200, 0), (200, 40), (0, 40)]))
+    a = _RegionCandidate(
+        region_type=RegionType.PLANAR_CUT,
+        profile=profile,
+        normal=np.array([1.0, 0.0, 0.0]),
+        position_3d=np.array([10.0, 50.0, 30.0]),
+        area_mm2=8000.0,
+        source_faces=[1, 2, 3],
+        bend_ops=[],
+        score=8000.0,
+        metadata={"kind": "facet"},
+    )
+    b = _RegionCandidate(
+        region_type=RegionType.PLANAR_CUT,
+        profile=profile,
+        normal=np.array([-1.0, 0.0, 0.0]),
+        position_3d=np.array([16.0, 50.0, 30.0]),
+        area_mm2=8000.0,
+        source_faces=[4, 5, 6],
+        bend_ops=[],
+        score=8000.0,
+        metadata={"kind": "facet"},
+    )
+
+    merged, pair_count = _collapse_planar_face_pairs([a, b])
+    assert pair_count == 1
+    merged_cand = merged[0]
+    assert merged_cand.metadata.get("stack_alignment") == "centered"
+    assert "exterior_face_origin_3d" not in merged_cand.metadata
+    assert "exterior_face_normal" not in merged_cand.metadata
+
+
+def test_centered_alignment_uses_midpoint():
+    """For a merged pair in centered mode, stack centers around position_3d (midpoint)."""
+    profile = PartProfile2D(
+        outline=Polygon([(0, 0), (300, 0), (300, 100), (0, 100)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=6.35,
+    )
+    # Two faces at x=0 and x=20, midpoint at x=10
+    cand = _RegionCandidate(
+        region_type=RegionType.PLANAR_CUT,
+        profile=profile,
+        normal=np.array([1.0, 0.0, 0.0]),
+        position_3d=np.array([10.0, 50.0, 30.0]),  # midpoint
+        area_mm2=30000.0,
+        source_faces=[0, 1, 2],
+        bend_ops=[],
+        score=30000.0,
+        metadata={
+            "kind": "merged_facet_pair",
+            "member_thickness_mm": 20.0,
+            "stack_alignment": "centered",
+        },
+        origin_3d=np.array([0.0, 50.0, 30.0]),  # different from position_3d
+    )
+    spec = Step3Input(
+        mesh_path="/tmp/not-used.stl",
+        part_budget_max=3,
+        enable_planar_stacking=True,
+    )
+
+    parts, debug = _select_candidates([cand], spec)
+
+    assert len(parts) >= 2
+    # All parts should be centered around x=10.0 (position_3d), not x=0.0 (origin_3d)
+    positions_x = [p.position_3d[0] for p in parts]
+    mean_x = sum(positions_x) / len(positions_x)
+    assert (
+        abs(mean_x - 10.0) < 1.0
+    ), f"Mean x position {mean_x} should be near midpoint 10.0, not origin 0.0"
+
+
+def test_exterior_flush_outermost_sheet_at_surface():
+    """For exterior-flush, sheet 0's outer surface is flush with the exterior face."""
+    thickness = 6.35
+    profile = PartProfile2D(
+        outline=Polygon([(0, 0), (300, 0), (300, 100), (0, 100)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+    )
+    ext_origin = np.array([50.0, 0.0, 0.0])
+    ext_normal = np.array([1.0, 0.0, 0.0])
+    cand = _RegionCandidate(
+        region_type=RegionType.PLANAR_CUT,
+        profile=profile,
+        normal=np.array([1.0, 0.0, 0.0]),
+        position_3d=np.array([40.0, 0.0, 0.0]),  # midpoint
+        area_mm2=30000.0,
+        source_faces=[0, 1, 2],
+        bend_ops=[],
+        score=30000.0,
+        metadata={
+            "kind": "merged_facet_pair",
+            "member_thickness_mm": 20.0,
+            "stack_alignment": "exterior_flush",
+            "exterior_face_origin_3d": [float(v) for v in ext_origin],
+            "exterior_face_normal": [float(v) for v in ext_normal],
+        },
+        origin_3d=np.array([50.0, 0.0, 0.0]),
+    )
+    spec = Step3Input(
+        mesh_path="/tmp/not-used.stl",
+        part_budget_max=3,
+        enable_planar_stacking=True,
+    )
+
+    parts, debug = _select_candidates([cand], spec)
+
+    assert len(parts) >= 2
+    # Sheet 0 center should be at ext_origin - 0.5 * thickness * ext_normal
+    expected_center_x = 50.0 - 0.5 * thickness
+    sheet0 = [p for p in parts if p.metadata.get("stack_layer_index") == 1][0]
+    assert (
+        abs(sheet0.position_3d[0] - expected_center_x) < 0.01
+    ), f"Sheet 0 center x={sheet0.position_3d[0]}, expected {expected_center_x}"
+    # Sheet 0's outer surface = center + 0.5 * thickness = ext_origin
+    outer_surface_x = sheet0.position_3d[0] + 0.5 * thickness
+    assert (
+        abs(outer_surface_x - 50.0) < 0.01
+    ), f"Sheet 0 outer surface x={outer_surface_x}, expected 50.0 (flush with exterior)"
+
+
+def test_stack_layer_offsets_mm_unchanged():
+    """Regression guard: _stack_layer_offsets_mm still produces correct symmetric offsets."""
+    # Single layer
+    assert _stack_layer_offsets_mm(1, 6.35, None) == [0.0]
+
+    # Two layers, no member thickness constraint
+    offsets_2 = _stack_layer_offsets_mm(2, 6.35, None)
+    assert len(offsets_2) == 2
+    assert abs(offsets_2[0] + offsets_2[1]) < 1e-9  # symmetric around 0
+    assert abs(offsets_2[1] - offsets_2[0] - 6.35) < 1e-9  # spaced by thickness
+
+    # Three layers with member thickness clamping
+    offsets_3 = _stack_layer_offsets_mm(3, 6.35, 12.7)
+    assert len(offsets_3) == 3
+    assert abs(offsets_3[0] + offsets_3[2]) < 1e-9  # symmetric
+    # All sheet centers should be within member thickness / 2
+    for off in offsets_3:
+        assert abs(off) <= 6.35 + 1e-9
+
+
+# --- Trim offset and overlap metric tests ---
+
+
+def _make_perpendicular_parts():
+    """Build a shelf (XZ plane) and a side panel (YZ plane) for trim tests.
+
+    Side panel: normal along +X, surface at x=270, thickness 6.35mm
+    Shelf: normal along +Y, spanning x from 0 to 300, y from 0 to 270+6.35
+    """
+    thickness = 6.35
+
+    # Side panel: lies in YZ plane, surface at x=270
+    side_profile = PartProfile2D(
+        outline=Polygon([(0, 0), (300, 0), (300, 400), (0, 400)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([0.0, 1.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([270.0, 0.0, 0.0]),
+    )
+    side = ManufacturingPart(
+        part_id="side_panel",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=side_profile,
+        region_type=RegionType.PLANAR_CUT,
+        # position_3d is the anti-normal face; material extends in the normal
+        # direction (+X) by thickness.  Surface at x=270, far face at x=263.65.
+        position_3d=np.array([263.65, 150.0, 200.0]),
+        rotation_3d=np.array([0.0, np.pi / 2.0, 0.0]),  # normal along +X
+        source_area_mm2=120000.0,
+        source_faces=[0, 1],
+        metadata={},
+    )
+
+    # Shelf: lies in XZ plane, extends past the side panel
+    shelf_profile = PartProfile2D(
+        outline=Polygon([(0, 0), (300, 0), (300, 400), (0, 400)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([1.0, 0.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([0.0, 150.0, 0.0]),
+    )
+    shelf = ManufacturingPart(
+        part_id="shelf",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=shelf_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([150.0, 150.0, 200.0]),
+        rotation_3d=np.array([np.pi / 2.0, 0.0, 0.0]),  # normal along +Y
+        source_area_mm2=120000.0,
+        source_faces=[2, 3],
+        metadata={},
+    )
+
+    return shelf, side
+
+
+def test_trim_offset_depends_on_side():
+    """Shelf trimmed against side panel should stop at side surface, not far face."""
+    shelf, side = _make_perpendicular_parts()
+    thickness = 6.35
+
+    # Side panel: normal +X, origin at x=270
+    side_normal = np.array([1.0, 0.0, 0.0])
+    side_origin = side.profile.origin_3d  # x=270
+
+    # Shelf origin is at x=0, which is on the anti-normal side (0 < 270).
+    # So the trim plane should be at the far face: 270 - 6.35 = 263.65
+    _trim_part_against_plane(shelf, side_normal, side_origin, thickness)
+
+    # The shelf outline is in the X direction (basis_u = [1,0,0]).
+    # After trimming, max x in the outline should be near 263.65 (far face)
+    trimmed_bounds = shelf.profile.outline.bounds  # (minx, miny, maxx, maxy)
+    max_x = trimmed_bounds[2]
+    expected_far_face = 270.0 - thickness  # 263.65
+    assert (
+        abs(max_x - expected_far_face) < 1.0
+    ), f"Shelf trimmed max_x={max_x}, expected ~{expected_far_face} (far face)"
+
+    # Now test from the normal side: a shelf on the other side of the panel
+    shelf2, _ = _make_perpendicular_parts()
+    shelf2.profile = PartProfile2D(
+        outline=Polygon([(250, 0), (350, 0), (350, 400), (250, 400)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([1.0, 0.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([0.0, 150.0, 0.0]),
+    )
+    # shelf2 origin is at x=0, but profile extends from x=250 to x=350
+    # However origin_3d.x=0 < 270 → anti-normal side. Let's put origin at x=280.
+    shelf2.profile = PartProfile2D(
+        outline=Polygon([(-10, 0), (80, 0), (80, 400), (-10, 400)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([1.0, 0.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([280.0, 150.0, 0.0]),
+    )
+    _trim_part_against_plane(shelf2, side_normal, side_origin, thickness)
+
+    # shelf2 origin at x=280 >= 270 (surface) → normal side → trim at surface (270)
+    # In local coords: surface at x=270 means u = 270 - 280 = -10
+    trimmed_bounds2 = shelf2.profile.outline.bounds
+    min_x_local = trimmed_bounds2[0]
+    # The outline min x should be near -10 (270 - 280) i.e. the surface
+    expected_surface_local = 270.0 - 280.0  # = -10
+    assert (
+        abs(min_x_local - expected_surface_local) < 1.0
+    ), f"Shelf2 trimmed min_x={min_x_local}, expected ~{expected_surface_local} (surface)"
+
+
+def _make_normal_side_shelf(side):
+    """Build a shelf whose origin is on the NORMAL side of the side panel.
+
+    The shelf extends from x=265 to x=400, with origin at x=280.
+    The side panel surface is at x=270.  Since 280 >= 270, the shelf
+    centroid is on the normal side, which is the scenario affected by the
+    trim-offset bug.
+    """
+    thickness = 6.35
+    shelf_profile = PartProfile2D(
+        outline=Polygon([(-15, 0), (120, 0), (120, 400), (-15, 400)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([1.0, 0.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([280.0, 150.0, 0.0]),
+    )
+    shelf = ManufacturingPart(
+        part_id="shelf_normal_side",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=shelf_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([332.5, 150.0, 200.0]),
+        rotation_3d=np.array([np.pi / 2.0, 0.0, 0.0]),
+        source_area_mm2=54000.0,
+        source_faces=[10, 11],
+        metadata={},
+    )
+    return shelf
+
+
+def test_plane_overlap_metric_zero_after_clean_trim():
+    """After proper trimming, parts should not overlap."""
+    _, side = _make_perpendicular_parts()
+    shelf = _make_normal_side_shelf(side)
+
+    side_normal = np.array([1.0, 0.0, 0.0])
+    _trim_part_against_plane(
+        shelf, side_normal, side.profile.origin_3d, side.thickness_mm
+    )
+
+    # After correct trim (normal side → cut at surface x=270),
+    # shelf outline min u should be at -10 (x=270).
+    trimmed_bounds = shelf.profile.outline.bounds
+    assert abs(trimmed_bounds[0] - (-10.0)) < 1.0
+
+    result = _compute_plane_overlap([shelf, side])
+    assert (
+        result["plane_overlap_pairs"] == 0
+    ), f"Expected no overlap pairs after trim, got {result}"
+    assert result["plane_overlap_max_mm"] < 0.1
+
+
+def test_plane_overlap_metric_detects_penetration():
+    """A shelf extending past the surface into the slab should be detected."""
+    _, side = _make_perpendicular_parts()
+
+    # Build a shelf on the normal side that extends 3mm past the surface
+    # into the slab.  Origin at x=280, outline min u = -13 → x = 267.
+    # Side panel surface at x=270, so vertex at x=267 is 3mm inside the slab.
+    thickness = 6.35
+    shelf_profile = PartProfile2D(
+        outline=Polygon([(-13, 0), (120, 0), (120, 400), (-13, 400)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([1.0, 0.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([280.0, 150.0, 0.0]),
+    )
+    shelf = ManufacturingPart(
+        part_id="shelf_penetrating",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=shelf_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([333.5, 150.0, 200.0]),
+        rotation_3d=np.array([np.pi / 2.0, 0.0, 0.0]),
+        source_area_mm2=53200.0,
+        source_faces=[12, 13],
+        metadata={},
+    )
+
+    result = _compute_plane_overlap([shelf, side])
+    assert (
+        result["plane_overlap_pairs"] > 0
+    ), f"Expected overlap detection, got {result}"
+    # Vertex at x=267 is 3mm past the surface (d=-3), so penetration ≈ 3mm
+    assert result["plane_overlap_max_mm"] >= 2.5
+
+
+def test_plane_overlap_metric_detects_edge_only_crossing():
+    """Detect overlap even when no outline vertex lies inside slab interior."""
+    _, side = _make_perpendicular_parts()
+    thickness = 6.35
+
+    # Shelf spans x=260..300 with origin x=280 (u range -20..20).
+    # Relative to side surface x=270, vertices are at d=-10 and d=+30:
+    # no vertex lies in slab interior (-6.35, 0), but the edge crosses it.
+    shelf_profile = PartProfile2D(
+        outline=Polygon([(-20, 0), (20, 0), (20, 400), (-20, 400)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([1.0, 0.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([280.0, 150.0, 0.0]),
+    )
+    shelf = ManufacturingPart(
+        part_id="shelf_edge_crossing",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=shelf_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([280.0, 150.0, 200.0]),
+        rotation_3d=np.array([np.pi / 2.0, 0.0, 0.0]),
+        source_area_mm2=16000.0,
+        source_faces=[14, 15],
+        metadata={},
+    )
+
+    result = _compute_plane_overlap([shelf, side])
+    assert (
+        result["plane_overlap_pairs"] > 0
+    ), f"Expected overlap from edge crossing, got {result}"
+    assert result["plane_overlap_max_mm"] >= 3.0
+
+
+# --- ONE_ZERO trim direction fix tests ---
+
+
+def test_shared_boundary_gate_skips_phantom_pairs():
+    """Phantom pair: planes intersect but outlines don't share a boundary → skip."""
+    thickness = 6.35
+
+    # Side panel: X-normal at x=200, extends y=0..80, z=0..300
+    # Plane intersection with shelf occurs at y=100, which is OUTSIDE
+    # the side's outline (y only goes to 80).  This is a phantom pair.
+    side_profile = PartProfile2D(
+        outline=Polygon([(0, 0), (80, 0), (80, 300), (0, 300)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([0.0, 1.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([200.0, 0.0, 0.0]),
+    )
+    side = ManufacturingPart(
+        part_id="side",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=side_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([200.0, 40.0, 150.0]),
+        rotation_3d=np.array([0.0, np.pi / 2.0, 0.0]),
+        source_area_mm2=24000.0,
+        source_faces=[0, 1],
+        metadata={},
+    )
+
+    # Shelf: Y-normal at y=100, extends x=0..210 (10mm past side surface at x=200).
+    # The shelf geometrically extends past x=200, but the intersection line
+    # at (x=200, y=100) doesn't pass through the side (y=0..80).
+    shelf_profile = PartProfile2D(
+        outline=Polygon([(0, 0), (210, 0), (210, 300), (0, 300)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([1.0, 0.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([0.0, 100.0, 0.0]),
+    )
+    shelf = ManufacturingPart(
+        part_id="shelf",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=shelf_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([105.0, 100.0, 150.0]),
+        rotation_3d=np.array([-np.pi / 2.0, 0.0, 0.0]),  # Y-normal
+        source_area_mm2=63000.0,
+        source_faces=[2, 3],
+        metadata={},
+    )
+
+    spec = Step3Input(mesh_path="/tmp/not-used.stl", part_budget_max=2)
+    parts = [shelf, side]
+    trimmed, trim_debug = _trim_at_plane_intersections(parts, spec)
+
+    # Shared-boundary gate should skip this phantom pair entirely.
+    # Neither part should be trimmed.
+    shelf_trimmed = next(p for p in trimmed if p.part_id == "shelf")
+    side_trimmed = next(p for p in trimmed if p.part_id == "side")
+
+    shelf_max_x = shelf_trimmed.profile.outline.bounds[2]
+    assert shelf_max_x >= 209.0, (
+        f"Shelf should NOT be trimmed (phantom pair), got max_x={shelf_max_x}"
+    )
+
+    side_area = side_trimmed.profile.outline.area
+    assert side_area >= 23000.0, (
+        f"Side should NOT be trimmed, area={side_area}"
+    )
+
+
+def test_identify_joint_contact_pairs_finds_perpendicular_contacts():
+    """_identify_joint_contact_pairs returns only perpendicular contact pairs."""
+    thickness = 6.35
+
+    # Part A: Z-normal at z=50
+    profile_a = PartProfile2D(
+        outline=Polygon([(-50, -50), (50, -50), (50, 50), (-50, 50)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+    )
+    a = ManufacturingPart(
+        part_id="part_a",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=profile_a,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([0.0, 0.0, 50.0]),
+        rotation_3d=np.zeros(3),  # Z-normal
+        source_area_mm2=10000.0,
+        source_faces=[0],
+        metadata={},
+    )
+
+    # Part B: X-normal at x=50 (perpendicular to A, in contact)
+    profile_b = PartProfile2D(
+        outline=Polygon([(-50, -50), (50, -50), (50, 50), (-50, 50)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+    )
+    b = ManufacturingPart(
+        part_id="part_b",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=profile_b,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([50.0, 0.0, 50.0]),
+        rotation_3d=np.array([0.0, np.pi / 2.0, 0.0]),  # X-normal
+        source_area_mm2=10000.0,
+        source_faces=[1],
+        metadata={},
+    )
+
+    # Part C: Z-normal at z=200 (parallel to A, far away)
+    profile_c = PartProfile2D(
+        outline=Polygon([(-50, -50), (50, -50), (50, 50), (-50, 50)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+    )
+    c = ManufacturingPart(
+        part_id="part_c",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=profile_c,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([0.0, 0.0, 200.0]),
+        rotation_3d=np.zeros(3),  # Z-normal (parallel to A)
+        source_area_mm2=10000.0,
+        source_faces=[2],
+        metadata={},
+    )
+
+    pairs = _identify_joint_contact_pairs(
+        [a, b, c],
+        contact_tolerance_mm=2.0,
+        parallel_dot_threshold=0.95,
+    )
+
+    # Only the perpendicular contact pair (0, 1) should be found
+    assert (0, 1) in pairs, f"Expected (0,1) in pairs, got {pairs}"
+    # Parallel pair (0, 2) should NOT be found
+    assert (0, 2) not in pairs, f"Parallel pair (0,2) should not be in {pairs}"
+    # (1, 2) may or may not be a contact depending on geometry
+    # but the key assertion is that perpendicular contacts are found

@@ -75,7 +75,9 @@ def _count_violations(violations: List[Dict[str, Any]], severity: str) -> int:
     return sum(1 for v in violations if str(v.get("severity", "")).lower() == severity)
 
 
-def _load_previous_results(suites_dir: Path) -> Tuple[Optional[str], Dict[str, Dict[str, Any]]]:
+def _load_previous_results(
+    suites_dir: Path,
+) -> Tuple[Optional[str], Dict[str, Dict[str, Any]]]:
     latest = suites_dir / "latest"
     if latest.is_symlink():
         target = (suites_dir / os.readlink(latest)).resolve()
@@ -166,8 +168,14 @@ def _build_summary_markdown(
     previous_by_case: Dict[str, Dict[str, Any]],
 ) -> str:
     run_rows = [r for r in rows if r.get("status") not in {"missing_input", "error"}]
-    score_vals = [r["overall_score"] for r in run_rows if isinstance(r.get("overall_score"), float)]
-    haus_vals = [r["hausdorff_mm"] for r in run_rows if isinstance(r.get("hausdorff_mm"), float)]
+    score_vals = [
+        r["overall_score"]
+        for r in run_rows
+        if isinstance(r.get("overall_score"), float)
+    ]
+    haus_vals = [
+        r["hausdorff_mm"] for r in run_rows if isinstance(r.get("hausdorff_mm"), float)
+    ]
     diff_vals = [
         r["plane_constraint_difficulty_weighted"]
         for r in run_rows
@@ -183,8 +191,16 @@ def _build_summary_markdown(
         f"- Executed: {len(run_rows)}",
         f"- Missing input: {sum(1 for r in rows if r.get('status') == 'missing_input')}",
         f"- Errors: {sum(1 for r in rows if r.get('status') == 'error')}",
-        f"- Mean score: {sum(score_vals) / len(score_vals):.3f}" if score_vals else "- Mean score: n/a",
-        f"- Mean hausdorff (mm): {sum(haus_vals) / len(haus_vals):.2f}" if haus_vals else "- Mean hausdorff (mm): n/a",
+        (
+            f"- Mean score: {sum(score_vals) / len(score_vals):.3f}"
+            if score_vals
+            else "- Mean score: n/a"
+        ),
+        (
+            f"- Mean hausdorff (mm): {sum(haus_vals) / len(haus_vals):.2f}"
+            if haus_vals
+            else "- Mean hausdorff (mm): n/a"
+        ),
         (
             f"- Mean weighted plane difficulty: {sum(diff_vals) / len(diff_vals):.3f}"
             if diff_vals
@@ -249,7 +265,9 @@ def _update_latest_pointer(suites_dir: Path, suite_dir: Path) -> None:
         latest.symlink_to(os.path.relpath(suite_dir, suites_dir))
     except OSError:
         latest.mkdir(parents=True, exist_ok=True)
-        (latest / "latest_suite.txt").write_text(suite_dir.name + "\n", encoding="utf-8")
+        (latest / "latest_suite.txt").write_text(
+            suite_dir.name + "\n", encoding="utf-8"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -414,6 +432,40 @@ def main(argv: Optional[List[str]] = None) -> int:
                     debug.get("intersection_dropped_count", 0)
                 ),
                 "stacked_extra_layers": int(debug.get("stacked_extra_layers", 0)),
+                "plane_overlap_pairs": int(debug.get("plane_overlap_pairs", 0) or 0),
+                "plane_overlap_max_mm": _safe_float(
+                    debug.get("plane_overlap_max_mm", 0.0)
+                ),
+                "plane_overlap_total_mm": _safe_float(
+                    debug.get("plane_overlap_total_mm", 0.0)
+                ),
+                "plane_overlap_region_count": int(
+                    len(debug.get("plane_overlap_regions", []) or [])
+                ),
+                "step2_plane_overlap_pairs": int(
+                    debug.get("step2_plane_overlap_pairs", 0) or 0
+                ),
+                "step2_plane_overlap_max_mm": _safe_float(
+                    debug.get("step2_plane_overlap_max_mm", 0.0)
+                ),
+                "step2_plane_overlap_region_count": int(
+                    len(debug.get("step2_plane_overlap_regions", []) or [])
+                ),
+                "step2_trim_search_mode": str(
+                    (debug.get("step2_trim_debug", {}) or {}).get("search_mode", "")
+                ),
+                "step2_trim_minor_pairs_count": int(
+                    (debug.get("step2_trim_debug", {}) or {}).get(
+                        "minor_pairs_count", 0
+                    )
+                    or 0
+                ),
+                "step2_trim_significant_pairs_count": int(
+                    (debug.get("step2_trim_debug", {}) or {}).get(
+                        "significant_pairs_count", 0
+                    )
+                    or 0
+                ),
                 "violation_code_counts": code_counts,
                 "violation_codes": sorted(code_counts.keys()),
                 "dominant_failure_mode": dominant_mode,
@@ -435,7 +487,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # Flush incremental results so the UI can poll progress
         (suite_dir / "results.json").write_text(
-            json.dumps({"suite_run_id": suite_run_id, "suite_name": suite_name, "rows": rows}, indent=2),
+            json.dumps(
+                {"suite_run_id": suite_run_id, "suite_name": suite_name, "rows": rows},
+                indent=2,
+            ),
             encoding="utf-8",
         )
 
