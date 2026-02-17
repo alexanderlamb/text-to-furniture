@@ -2527,6 +2527,7 @@ def _trim_loss_fraction(
 
 
 _SIGNIFICANT_TRIM_THRESHOLD = 0.20  # 20 % area loss
+_NEAR_ZERO_TRIM = 1e-4  # Below this, a trim removes no meaningful area
 
 
 def _group_pairs_by_stack(
@@ -2597,10 +2598,20 @@ def _trim_at_plane_intersections(
     # The part with lower trim loss has the intersection line closer to its edge,
     # meaning it barely extends past the other part. Trim it so the continuing
     # part keeps its full extent.  Tie-break on area (larger area wins).
+    #
+    # ONE_ZERO fix: when one loss is ~0 (cutting plane doesn't intersect the
+    # outline), trimming that part is a no-op.  Always trim the non-zero part
+    # instead — it's the one actually extending past the boundary.
     minor_groups = [[(i, j)] for i, j, _, _ in minor_pairs]
     minor_mask = 0
     for k, (i, j, loss_i, loss_j) in enumerate(minor_pairs):
-        if loss_i < loss_j:
+        if loss_j < _NEAR_ZERO_TRIM and loss_i >= _NEAR_ZERO_TRIM:
+            # Trimming j is a no-op; i actually crosses → trim i
+            minor_mask |= 1 << k
+        elif loss_i < _NEAR_ZERO_TRIM and loss_j >= _NEAR_ZERO_TRIM:
+            # Trimming i is a no-op; j actually crosses → trim j (bit stays 0)
+            pass
+        elif loss_i < loss_j:
             # Part i loses less → i is more at its end → trim i
             minor_mask |= 1 << k
         elif loss_i == loss_j:
