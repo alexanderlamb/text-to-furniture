@@ -11,6 +11,7 @@ from step3_first_principles import (
     _RegionCandidate,
     _classify_face_exterior,
     _collapse_planar_face_pairs,
+    _enforce_zero_overlap,
     _compute_plane_overlap,
     _identify_joint_contact_pairs,
     _select_candidates,
@@ -731,12 +732,8 @@ def test_trim_offset_depends_on_side():
     trimmed_bounds = shelf_trimmed.profile.outline.bounds
     max_x = trimmed_bounds[2]
     # Shelf should stop near the slab boundary (263.65 + tolerance)
-    assert max_x < 270.0, (
-        f"Shelf max_x={max_x} should be less than 270 (slab surface)"
-    )
-    assert max_x > 260.0, (
-        f"Shelf max_x={max_x} unexpectedly small — too much trimmed"
-    )
+    assert max_x < 270.0, f"Shelf max_x={max_x} should be less than 270 (slab surface)"
+    assert max_x > 260.0, f"Shelf max_x={max_x} unexpectedly small — too much trimmed"
 
 
 def _make_normal_side_shelf(side):
@@ -784,6 +781,39 @@ def test_plane_overlap_metric_zero_after_clean_trim():
         result["plane_overlap_pairs"] == 0
     ), f"Expected no overlap pairs after trim, got {result}"
     assert result["plane_overlap_max_mm"] < 0.1
+
+
+def test_trim_by_slab_subtraction_reports_parallel_worker_count():
+    shelf, side = _make_perpendicular_parts()
+    spec = Step3Input(
+        mesh_path="/tmp/not-used.stl",
+        part_budget_max=2,
+        trim_parallel_workers=2,
+    )
+    _trimmed, debug = _trim_by_slab_subtraction([shelf, side], spec)
+    assert int(debug.get("trim_parallel_workers", 0)) >= 1
+
+
+def test_strict_no_overlap_prunes_when_trim_budget_is_too_low():
+    shelf, side = _make_perpendicular_parts()
+    spec = Step3Input(
+        mesh_path="/tmp/not-used.stl",
+        part_budget_max=2,
+        enforce_zero_overlap=True,
+        trim_loss_budget_fraction=0.05,
+        strict_overlap_max_passes=1,
+        strict_overlap_allow_pruning=True,
+        strict_overlap_max_part_drops=1,
+    )
+    cleaned_parts, cleaned_joints, debug = _enforce_zero_overlap(
+        [shelf, side], [], spec
+    )
+    overlap = _compute_plane_overlap(cleaned_parts, joints=cleaned_joints)
+
+    assert debug.get("strict_no_overlap_resolved") is True
+    assert overlap["plane_overlap_pairs"] == 0
+    assert int(len(cleaned_parts)) == 1
+    assert int(len(debug.get("strict_overlap_dropped_parts", []))) == 1
 
 
 def test_plane_overlap_metric_detects_penetration():
@@ -923,14 +953,12 @@ def test_phantom_pairs_not_trimmed():
     side_trimmed = next(p for p in trimmed if p.part_id == "side")
 
     shelf_max_x = shelf_trimmed.profile.outline.bounds[2]
-    assert shelf_max_x >= 209.0, (
-        f"Shelf should NOT be trimmed (phantom pair), got max_x={shelf_max_x}"
-    )
+    assert (
+        shelf_max_x >= 209.0
+    ), f"Shelf should NOT be trimmed (phantom pair), got max_x={shelf_max_x}"
 
     side_area = side_trimmed.profile.outline.area
-    assert side_area >= 23000.0, (
-        f"Side should NOT be trimmed, area={side_area}"
-    )
+    assert side_area >= 23000.0, f"Side should NOT be trimmed, area={side_area}"
 
 
 def test_slab_intrusion_empty_for_distant_parts():
@@ -1041,7 +1069,9 @@ def test_slab_intrusion_t_junction_strip():
     # Strip should be roughly thickness * shelf_height (minus tolerance)
     # ~5.35 * 400 = 2140 (with tolerance reducing effective thickness)
     assert total_area > 1000, f"Intrusion area {total_area} too small for T-junction"
-    assert total_area < 5000, f"Intrusion area {total_area} too large — not a thin strip"
+    assert (
+        total_area < 5000
+    ), f"Intrusion area {total_area} too large — not a thin strip"
 
 
 def test_identify_joint_contact_pairs_finds_perpendicular_contacts():

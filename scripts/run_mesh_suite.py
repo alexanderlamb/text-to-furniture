@@ -285,6 +285,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-height-mm", type=float, default=750.0)
     parser.add_argument("--no-auto-scale", action="store_true")
     parser.add_argument("--no-bending", action="store_true")
+    parser.add_argument(
+        "--step3-trim-parallel-workers",
+        type=int,
+        default=0,
+        help="Workers for trim-pair evaluation (0=auto).",
+    )
+    parser.add_argument(
+        "--step3-enforce-zero-overlap",
+        action="store_true",
+        help="Enable strict no-overlap enforcement in Step 3.",
+    )
     parser.add_argument("--with-exports", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--strict-missing", action="store_true")
@@ -361,6 +372,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             scs_capabilities=capability,
             target_height_mm=float(args.target_height_mm),
             auto_scale=not args.no_auto_scale,
+            trim_parallel_workers=int(args.step3_trim_parallel_workers),
+            enforce_zero_overlap=bool(args.step3_enforce_zero_overlap),
         )
         _apply_step3_overrides(step3_input, step3_overrides)
         config = PipelineConfig(

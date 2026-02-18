@@ -145,6 +145,49 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.95,
         help="Skip explicit joints when |dot(normals)| exceeds this threshold",
     )
+    parser.add_argument(
+        "--step3-trim-parallel-workers",
+        type=int,
+        default=0,
+        help=(
+            "Workers for trim-pair evaluation (0=auto, 1=disable parallel "
+            "pair evaluation)"
+        ),
+    )
+    parser.add_argument(
+        "--step3-trim-loss-budget-fraction",
+        type=float,
+        default=0.40,
+        help="Max cumulative trim loss per part during Step 2 (0.05-0.95).",
+    )
+    parser.add_argument(
+        "--step3-post-joint-max-trim-loss-fraction",
+        type=float,
+        default=0.15,
+        help="Max trim loss per pair in post-joint safety cleanup.",
+    )
+    parser.add_argument(
+        "--step3-enforce-zero-overlap",
+        action="store_true",
+        help="Enable strict no-overlap enforcement with iterative remediation.",
+    )
+    parser.add_argument(
+        "--step3-strict-overlap-max-passes",
+        type=int,
+        default=3,
+        help="Maximum strict overlap remediation passes before pruning.",
+    )
+    parser.add_argument(
+        "--step3-strict-overlap-max-part-drops",
+        type=int,
+        default=2,
+        help="Maximum parts to drop if strict overlap remediation cannot reach zero.",
+    )
+    parser.add_argument(
+        "--step3-no-strict-overlap-pruning",
+        action="store_true",
+        help="Disable part-pruning fallback in strict no-overlap mode.",
+    )
     parser.add_argument("--no-svg", action="store_true", help="Skip SVG export")
     parser.add_argument("--no-dxf", action="store_true", help="Skip DXF export")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -192,6 +235,19 @@ def main(argv: list[str] | None = None) -> int:
         joint_contact_tolerance_mm=max(0.0, args.step3_joint_contact_tolerance_mm),
         joint_parallel_dot_threshold=max(
             0.0, min(0.999999, args.step3_joint_parallel_dot_threshold)
+        ),
+        trim_parallel_workers=int(args.step3_trim_parallel_workers),
+        trim_loss_budget_fraction=max(
+            0.05, min(0.95, args.step3_trim_loss_budget_fraction)
+        ),
+        post_joint_max_trim_loss_fraction=max(
+            0.01, min(0.95, args.step3_post_joint_max_trim_loss_fraction)
+        ),
+        enforce_zero_overlap=bool(args.step3_enforce_zero_overlap),
+        strict_overlap_max_passes=max(1, int(args.step3_strict_overlap_max_passes)),
+        strict_overlap_allow_pruning=not args.step3_no_strict_overlap_pruning,
+        strict_overlap_max_part_drops=max(
+            0, int(args.step3_strict_overlap_max_part_drops)
         ),
     )
 
