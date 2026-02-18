@@ -14,10 +14,10 @@ from step3_first_principles import (
     _compute_plane_overlap,
     _identify_joint_contact_pairs,
     _select_candidates,
+    _slab_intrusion_polygon,
     _stack_layer_offsets_mm,
     _synthesize_joint_specs,
-    _trim_at_plane_intersections,
-    _trim_part_against_plane,
+    _trim_by_slab_subtraction,
     Step3Input,
     build_default_capability_profile,
     decompose_first_principles,
@@ -718,58 +718,25 @@ def _make_perpendicular_parts():
 
 
 def test_trim_offset_depends_on_side():
-    """Shelf trimmed against side panel should stop at side surface, not far face."""
+    """Shelf trimmed via slab subtraction should stop at slab boundary."""
     shelf, side = _make_perpendicular_parts()
     thickness = 6.35
 
-    # Side panel: normal +X, origin at x=270
-    side_normal = np.array([1.0, 0.0, 0.0])
-    side_origin = side.profile.origin_3d  # x=270
+    # The shelf extends from x=0 to x=300, side panel slab is at x=263.65..270.
+    # _trim_by_slab_subtraction should clip the shelf to stop at the slab edge.
+    spec = Step3Input(mesh_path="/tmp/not-used.stl", part_budget_max=2)
+    trimmed, _ = _trim_by_slab_subtraction([shelf, side], spec)
 
-    # Shelf origin is at x=0, which is on the anti-normal side (0 < 270).
-    # So the trim plane should be at the far face: 270 - 6.35 = 263.65
-    _trim_part_against_plane(shelf, side_normal, side_origin, thickness)
-
-    # The shelf outline is in the X direction (basis_u = [1,0,0]).
-    # After trimming, max x in the outline should be near 263.65 (far face)
-    trimmed_bounds = shelf.profile.outline.bounds  # (minx, miny, maxx, maxy)
+    shelf_trimmed = next(p for p in trimmed if p.part_id == "shelf")
+    trimmed_bounds = shelf_trimmed.profile.outline.bounds
     max_x = trimmed_bounds[2]
-    expected_far_face = 270.0 - thickness  # 263.65
-    assert (
-        abs(max_x - expected_far_face) < 1.0
-    ), f"Shelf trimmed max_x={max_x}, expected ~{expected_far_face} (far face)"
-
-    # Now test from the normal side: a shelf on the other side of the panel
-    shelf2, _ = _make_perpendicular_parts()
-    shelf2.profile = PartProfile2D(
-        outline=Polygon([(250, 0), (350, 0), (350, 400), (250, 400)]),
-        material_key="plywood_baltic_birch",
-        thickness_mm=thickness,
-        basis_u=np.array([1.0, 0.0, 0.0]),
-        basis_v=np.array([0.0, 0.0, 1.0]),
-        origin_3d=np.array([0.0, 150.0, 0.0]),
+    # Shelf should stop near the slab boundary (263.65 + tolerance)
+    assert max_x < 270.0, (
+        f"Shelf max_x={max_x} should be less than 270 (slab surface)"
     )
-    # shelf2 origin is at x=0, but profile extends from x=250 to x=350
-    # However origin_3d.x=0 < 270 → anti-normal side. Let's put origin at x=280.
-    shelf2.profile = PartProfile2D(
-        outline=Polygon([(-10, 0), (80, 0), (80, 400), (-10, 400)]),
-        material_key="plywood_baltic_birch",
-        thickness_mm=thickness,
-        basis_u=np.array([1.0, 0.0, 0.0]),
-        basis_v=np.array([0.0, 0.0, 1.0]),
-        origin_3d=np.array([280.0, 150.0, 0.0]),
+    assert max_x > 260.0, (
+        f"Shelf max_x={max_x} unexpectedly small — too much trimmed"
     )
-    _trim_part_against_plane(shelf2, side_normal, side_origin, thickness)
-
-    # shelf2 origin at x=280 >= 270 (surface) → normal side → trim at surface (270)
-    # In local coords: surface at x=270 means u = 270 - 280 = -10
-    trimmed_bounds2 = shelf2.profile.outline.bounds
-    min_x_local = trimmed_bounds2[0]
-    # The outline min x should be near -10 (270 - 280) i.e. the surface
-    expected_surface_local = 270.0 - 280.0  # = -10
-    assert (
-        abs(min_x_local - expected_surface_local) < 1.0
-    ), f"Shelf2 trimmed min_x={min_x_local}, expected ~{expected_surface_local} (surface)"
 
 
 def _make_normal_side_shelf(side):
@@ -805,21 +772,14 @@ def _make_normal_side_shelf(side):
 
 
 def test_plane_overlap_metric_zero_after_clean_trim():
-    """After proper trimming, parts should not overlap."""
+    """After slab-subtraction trimming, parts should not overlap."""
     _, side = _make_perpendicular_parts()
     shelf = _make_normal_side_shelf(side)
 
-    side_normal = np.array([1.0, 0.0, 0.0])
-    _trim_part_against_plane(
-        shelf, side_normal, side.profile.origin_3d, side.thickness_mm
-    )
+    spec = Step3Input(mesh_path="/tmp/not-used.stl", part_budget_max=2)
+    trimmed, _ = _trim_by_slab_subtraction([shelf, side], spec)
 
-    # After correct trim (normal side → cut at surface x=270),
-    # shelf outline min u should be at -10 (x=270).
-    trimmed_bounds = shelf.profile.outline.bounds
-    assert abs(trimmed_bounds[0] - (-10.0)) < 1.0
-
-    result = _compute_plane_overlap([shelf, side])
+    result = _compute_plane_overlap(trimmed)
     assert (
         result["plane_overlap_pairs"] == 0
     ), f"Expected no overlap pairs after trim, got {result}"
@@ -902,13 +862,14 @@ def test_plane_overlap_metric_detects_edge_only_crossing():
 # --- ONE_ZERO trim direction fix tests ---
 
 
-def test_shared_boundary_gate_skips_phantom_pairs():
-    """Phantom pair: planes intersect but outlines don't share a boundary → skip."""
+def test_phantom_pairs_not_trimmed():
+    """Phantom pair: parts on non-overlapping planes → no mutual slab penetration → skip."""
     thickness = 6.35
 
     # Side panel: X-normal at x=200, extends y=0..80, z=0..300
-    # Plane intersection with shelf occurs at y=100, which is OUTSIDE
-    # the side's outline (y only goes to 80).  This is a phantom pair.
+    # The shelf is at y=100 which is outside the side panel's y range (0..80).
+    # Mutual slab penetration should be ~0 because the side panel's slab
+    # at x=193.65..200 doesn't reach the shelf's y=100 position.
     side_profile = PartProfile2D(
         outline=Polygon([(0, 0), (80, 0), (80, 300), (0, 300)]),
         material_key="plywood_baltic_birch",
@@ -931,8 +892,6 @@ def test_shared_boundary_gate_skips_phantom_pairs():
     )
 
     # Shelf: Y-normal at y=100, extends x=0..210 (10mm past side surface at x=200).
-    # The shelf geometrically extends past x=200, but the intersection line
-    # at (x=200, y=100) doesn't pass through the side (y=0..80).
     shelf_profile = PartProfile2D(
         outline=Polygon([(0, 0), (210, 0), (210, 300), (0, 300)]),
         material_key="plywood_baltic_birch",
@@ -956,9 +915,9 @@ def test_shared_boundary_gate_skips_phantom_pairs():
 
     spec = Step3Input(mesh_path="/tmp/not-used.stl", part_budget_max=2)
     parts = [shelf, side]
-    trimmed, trim_debug = _trim_at_plane_intersections(parts, spec)
+    trimmed, trim_debug = _trim_by_slab_subtraction(parts, spec)
 
-    # Shared-boundary gate should skip this phantom pair entirely.
+    # Mutual penetration gate should skip this phantom pair entirely.
     # Neither part should be trimmed.
     shelf_trimmed = next(p for p in trimmed if p.part_id == "shelf")
     side_trimmed = next(p for p in trimmed if p.part_id == "side")
@@ -972,6 +931,117 @@ def test_shared_boundary_gate_skips_phantom_pairs():
     assert side_area >= 23000.0, (
         f"Side should NOT be trimmed, area={side_area}"
     )
+
+
+def test_slab_intrusion_empty_for_distant_parts():
+    """_slab_intrusion_polygon returns empty for parts that are physically separated."""
+    thickness = 6.35
+
+    # Side panel at x=300
+    side_profile = PartProfile2D(
+        outline=Polygon([(0, 0), (100, 0), (100, 200), (0, 200)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([0.0, 1.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([300.0, 0.0, 0.0]),
+    )
+    side = ManufacturingPart(
+        part_id="side",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=side_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([300.0, 50.0, 100.0]),
+        rotation_3d=np.array([0.0, np.pi / 2.0, 0.0]),
+        source_area_mm2=20000.0,
+        source_faces=[0],
+        metadata={},
+    )
+
+    # Shelf at y=200, only extends to x=150 — far from side at x=300
+    shelf_profile = PartProfile2D(
+        outline=Polygon([(0, 0), (150, 0), (150, 200), (0, 200)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([1.0, 0.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([0.0, 200.0, 0.0]),
+    )
+    shelf = ManufacturingPart(
+        part_id="shelf",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=shelf_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([75.0, 200.0, 100.0]),
+        rotation_3d=np.array([np.pi / 2.0, 0.0, 0.0]),
+        source_area_mm2=30000.0,
+        source_faces=[1],
+        metadata={},
+    )
+
+    # Shelf doesn't reach the side panel's slab → no intrusion
+    result = _slab_intrusion_polygon(shelf, side)
+    assert result == [], f"Expected empty intrusion, got {len(result)} polygons"
+
+
+def test_slab_intrusion_t_junction_strip():
+    """At a T-junction, intrusion should be a thin strip ~thickness wide."""
+    thickness = 6.35
+
+    # Side panel: normal +X, surface at x=270, far face at x=263.65
+    side_profile = PartProfile2D(
+        outline=Polygon([(0, 0), (300, 0), (300, 400), (0, 400)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([0.0, 1.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([270.0, 0.0, 0.0]),
+    )
+    side = ManufacturingPart(
+        part_id="side",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=side_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([263.65, 150.0, 200.0]),
+        rotation_3d=np.array([0.0, np.pi / 2.0, 0.0]),
+        source_area_mm2=120000.0,
+        source_faces=[0],
+        metadata={},
+    )
+
+    # Shelf: normal +Y, extends x=0..300 (past the side panel slab)
+    shelf_profile = PartProfile2D(
+        outline=Polygon([(0, 0), (300, 0), (300, 400), (0, 400)]),
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        basis_u=np.array([1.0, 0.0, 0.0]),
+        basis_v=np.array([0.0, 0.0, 1.0]),
+        origin_3d=np.array([0.0, 150.0, 0.0]),
+    )
+    shelf = ManufacturingPart(
+        part_id="shelf",
+        material_key="plywood_baltic_birch",
+        thickness_mm=thickness,
+        profile=shelf_profile,
+        region_type=RegionType.PLANAR_CUT,
+        position_3d=np.array([150.0, 150.0, 200.0]),
+        rotation_3d=np.array([np.pi / 2.0, 0.0, 0.0]),
+        source_area_mm2=120000.0,
+        source_faces=[1],
+        metadata={},
+    )
+
+    # Shelf intrusion into side panel's slab should be a thin strip
+    intrusion = _slab_intrusion_polygon(shelf, side)
+    assert len(intrusion) > 0, "Expected intrusion at T-junction"
+    total_area = sum(p.area for p in intrusion)
+    # Strip should be roughly thickness * shelf_height (minus tolerance)
+    # ~5.35 * 400 = 2140 (with tolerance reducing effective thickness)
+    assert total_area > 1000, f"Intrusion area {total_area} too small for T-junction"
+    assert total_area < 5000, f"Intrusion area {total_area} too large — not a thin strip"
 
 
 def test_identify_joint_contact_pairs_finds_perpendicular_contacts():

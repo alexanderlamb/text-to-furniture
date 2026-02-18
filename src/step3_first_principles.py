@@ -464,7 +464,6 @@ def decompose_first_principles(input_spec: Step3Input) -> Step3Output:
         selected_parts,
         contact_tolerance_mm=input_spec.joint_contact_tolerance_mm,
         parallel_dot_threshold=input_spec.joint_parallel_dot_threshold,
-        joint_distance_mm=input_spec.joint_distance_mm,
     )
     selected_parts, constrain_snapshots = _constrain_outlines(
         selected_parts, mesh, input_spec, joint_pairs=joint_contact_pairs
@@ -2077,7 +2076,6 @@ def _identify_joint_contact_pairs(
     parts: List[ManufacturingPart],
     contact_tolerance_mm: float = 2.0,
     parallel_dot_threshold: float = 0.95,
-    joint_distance_mm: float = 240.0,
 ) -> Set[Tuple[int, int]]:
     """Identify part index pairs that will need joints (pre-trim).
 
@@ -2105,10 +2103,6 @@ def _identify_joint_contact_pairs(
                 pa, pb, contact_tolerance_mm=contact_tolerance_mm,
             )
             if not in_contact:
-                continue
-
-            distance = float(np.linalg.norm(pa.position_3d - pb.position_3d))
-            if distance > float(max(1.0, joint_distance_mm * 1.8)):
                 continue
 
             pairs.add((i, j))
@@ -2153,9 +2147,9 @@ def _synthesize_joint_specs(
         if not in_contact:
             continue
 
-        distance = float(np.linalg.norm(pa.position_3d - pb.position_3d))
-        if distance > float(max(1.0, joint_distance_mm * 1.8)):
-            continue
+        distance = float(np.linalg.norm(
+            np.asarray(pa.position_3d) - np.asarray(pb.position_3d)
+        ))
 
         if pa.bend_ops or pb.bend_ops:
             joint_type = "through_bolt"
@@ -3418,6 +3412,135 @@ def _clip_polygon_strip(
     return result
 
 
+def _slab_intrusion_polygon(
+    src_part: ManufacturingPart,
+    dst_part: ManufacturingPart,
+) -> List[Polygon]:
+    """Return polygons in src_part's 2D frame that lie inside dst_part's material slab."""
+    prof_src = src_part.profile
+    if prof_src.basis_u is None or prof_src.basis_v is None or prof_src.origin_3d is None:
+        return []
+    if dst_part.profile.origin_3d is None:
+        return []
+    src_outline = prof_src.net_polygon()
+    if src_outline.is_empty or src_outline.area <= 1e-6:
+        return []
+    n_dst = _rotation_to_normal(dst_part.rotation_3d)
+    a = float(np.dot(n_dst, prof_src.basis_u))
+    b = float(np.dot(n_dst, prof_src.basis_v))
+    if math.hypot(a, b) < 1e-9:
+        return []
+    dst_slab_origin = np.asarray(dst_part.position_3d, dtype=float) + n_dst * dst_part.thickness_mm
+    d_surface = float(np.dot(n_dst, dst_slab_origin))
+    c0 = float(np.dot(n_dst, prof_src.origin_3d) - d_surface)
+    tol = _SLAB_INTERIOR_TOL
+    lo = -float(dst_part.thickness_mm) + tol
+    hi = -tol
+    clipped = _clip_polygon_strip(src_outline, a, b, c0, lo, hi)
+    return [p for p in clipped if not p.is_empty and p.area > 1.0]
+
+
+def _slab_cut_polygon(
+    src_part: ManufacturingPart,
+    dst_part: ManufacturingPart,
+) -> List[Polygon]:
+    """Return half-plane polygon in src_part's 2D frame past dst_part's slab entry.
+
+    Unlike `_slab_intrusion_polygon` (which returns the thin strip inside the
+    slab), this returns everything from the slab entry face outward.  Subtracting
+    this from the outline produces a clean, non-fragmenting trim — equivalent to
+    a half-plane clip at the slab boundary.
+    """
+    prof_src = src_part.profile
+    if prof_src.basis_u is None or prof_src.basis_v is None or prof_src.origin_3d is None:
+        return []
+    if dst_part.profile.origin_3d is None:
+        return []
+    src_outline = prof_src.outline
+    if src_outline.is_empty or src_outline.area <= 1e-6:
+        return []
+    n_dst = _rotation_to_normal(dst_part.rotation_3d)
+    a = float(np.dot(n_dst, prof_src.basis_u))
+    b = float(np.dot(n_dst, prof_src.basis_v))
+    if math.hypot(a, b) < 1e-9:
+        return []
+    # Slab entry face: the face closest to the trimmed part.
+    # position_3d is the anti-normal face; position_3d + normal * thickness is the surface.
+    dst_slab_origin = np.asarray(dst_part.position_3d, dtype=float) + n_dst * dst_part.thickness_mm
+    d_surface = float(np.dot(n_dst, dst_slab_origin))
+    # Determine which face is closest to the trimmed part's origin.
+    d_trimmed = float(np.dot(n_dst, prof_src.origin_3d))
+    if d_trimmed >= d_surface:
+        # Part on normal side → entry face is the surface
+        d_entry = d_surface
+    else:
+        # Part on anti-normal side → entry face is the far face
+        d_entry = d_surface - dst_part.thickness_mm
+    c_entry = d_entry - float(np.dot(n_dst, prof_src.origin_3d))
+    # Determine which side of the boundary to subtract.
+    # The centroid should be on the KEEP side.
+    cx = float(src_outline.centroid.x)
+    cy = float(src_outline.centroid.y)
+    centroid_val = a * cx + b * cy
+    if centroid_val >= c_entry:
+        # Centroid on a*x + b*y >= c_entry side → keep that side → subtract the < side
+        # Subtract: a*x + b*y < c_entry → clip to (-a)*x + (-b)*y >= -c_entry
+        clipped = _clip_polygon_half_plane(src_outline, -a, -b, -c_entry)
+    else:
+        # Centroid on a*x + b*y < c_entry side → keep that side → subtract the >= side
+        clipped = _clip_polygon_half_plane(src_outline, a, b, c_entry)
+    return [p for p in clipped if not p.is_empty and p.area > 1.0]
+
+
+def _intrusion_overlaps_target(
+    intrusion_polys: List[Polygon],
+    src_part: ManufacturingPart,
+    dst_part: ManufacturingPart,
+) -> bool:
+    """Check whether intrusion polygons (in src's 2D frame) physically overlap dst's outline.
+
+    Projects the centroid of the intrusion region from src's 2D frame through 3D
+    into dst's 2D frame, then checks proximity to dst's outline.  This catches
+    phantom pairs where the slab intersection is non-empty but the parts are
+    spatially separated in-plane.
+    """
+    if not intrusion_polys:
+        return False
+    src_prof = src_part.profile
+    dst_prof = dst_part.profile
+    if (
+        src_prof.basis_u is None
+        or src_prof.basis_v is None
+        or src_prof.origin_3d is None
+    ):
+        return False
+    if (
+        dst_prof.basis_u is None
+        or dst_prof.basis_v is None
+        or dst_prof.origin_3d is None
+    ):
+        return False
+    combined = unary_union(intrusion_polys)
+    if combined.is_empty:
+        return False
+    # Project intrusion centroid: src 2D → 3D → dst 2D.
+    centroid = combined.centroid
+    cu, cv = float(centroid.x), float(centroid.y)
+    p3d = (
+        np.asarray(src_prof.origin_3d, dtype=float)
+        + cu * np.asarray(src_prof.basis_u, dtype=float)
+        + cv * np.asarray(src_prof.basis_v, dtype=float)
+    )
+    delta = p3d - np.asarray(dst_prof.origin_3d, dtype=float)
+    du = float(np.dot(delta, dst_prof.basis_u))
+    dv = float(np.dot(delta, dst_prof.basis_v))
+    dst_outline = dst_prof.net_polygon()
+    if dst_outline.is_empty:
+        return False
+    tol = max(src_part.thickness_mm, dst_part.thickness_mm)
+    return float(Point(du, dv).distance(dst_outline)) <= tol
+
+
 def _directional_overlap_regions(
     src_part: ManufacturingPart,
     dst_part: ManufacturingPart,
@@ -3426,40 +3549,11 @@ def _directional_overlap_regions(
     """Compute overlap-region polygons on src_part where it intrudes dst_part slab."""
     if overlap_mm <= 0.01:
         return []
-    prof_src = src_part.profile
-    prof_dst = dst_part.profile
-    if (
-        prof_src.basis_u is None
-        or prof_src.basis_v is None
-        or prof_src.origin_3d is None
-        or prof_dst.origin_3d is None
-    ):
-        return []
-
-    # Use net_polygon (outline minus cutouts) so slot voids are excluded
-    src_outline = prof_src.net_polygon()
-    if src_outline.is_empty or src_outline.area <= 1e-6:
-        return []
-
-    n_dst = _rotation_to_normal(dst_part.rotation_3d)
-    a = float(np.dot(n_dst, prof_src.basis_u))
-    b = float(np.dot(n_dst, prof_src.basis_v))
-    if math.hypot(a, b) < 1e-9:
-        return []
-
-    # Slab origin = outward-facing face (position_3d + normal * thickness).
-    # Material extends in anti-normal direction per _slab_penetration convention.
-    # For stacked parts, position_3d differs per layer (unlike origin_3d).
-    dst_slab_origin = np.asarray(dst_part.position_3d, dtype=float) + n_dst * dst_part.thickness_mm
-    d_surface = float(np.dot(n_dst, dst_slab_origin))
-    c0 = float(np.dot(n_dst, prof_src.origin_3d) - d_surface)
-    tol = _SLAB_INTERIOR_TOL
-    lo = -float(dst_part.thickness_mm) + tol
-    hi = -tol
-    clipped_polys = _clip_polygon_strip(src_outline, a, b, c0, lo, hi)
+    clipped_polys = _slab_intrusion_polygon(src_part, dst_part)
     if not clipped_polys:
         return []
 
+    prof_src = src_part.profile
     out: List[Dict[str, Any]] = []
     for poly in clipped_polys:
         if poly.is_empty or poly.area <= 1e-6:
@@ -3709,14 +3803,51 @@ def _post_joint_overlap_cleanup(
             if total_area < 1.0:
                 continue
 
-            # Try both trim directions, pick the lower-loss one
-            loss_a = _trim_loss_fraction(pa, n_b, slab_origin_b, pb.thickness_mm)
-            loss_b = _trim_loss_fraction(pb, n_a, slab_origin_a, pa.thickness_mm)
-            if loss_a <= loss_b and loss_a < _POST_JOINT_MAX_TRIM_LOSS:
-                _trim_part_against_plane(pa, n_b, slab_origin_b, pb.thickness_mm)
-            elif loss_b < _POST_JOINT_MAX_TRIM_LOSS:
-                _trim_part_against_plane(pb, n_a, slab_origin_a, pa.thickness_mm)
-            # else: both losses too high, skip
+            # Compute slab intrusion polygons and pick lower-loss direction
+            intrusion_a = _slab_intrusion_polygon(pa, pb)
+            intrusion_b = _slab_intrusion_polygon(pb, pa)
+            intr_area_a = sum(p.area for p in intrusion_a)
+            intr_area_b = sum(p.area for p in intrusion_b)
+            loss_a = intr_area_a / max(pa.profile.outline.area, 1e-6)
+            loss_b = intr_area_b / max(pb.profile.outline.area, 1e-6)
+
+            if loss_a <= loss_b and loss_a < _POST_JOINT_MAX_TRIM_LOSS and intrusion_a:
+                combined = unary_union(intrusion_a)
+                try:
+                    new_outline = pa.profile.outline.difference(combined)
+                except Exception:
+                    continue
+                result = _clean_polygon(new_outline)
+                if result is not None and not result.is_empty and result.area > 1.0:
+                    pa.profile = PartProfile2D(
+                        outline=result,
+                        cutouts=pa.profile.cutouts,
+                        features=pa.profile.features,
+                        material_key=pa.profile.material_key,
+                        thickness_mm=pa.profile.thickness_mm,
+                        basis_u=pa.profile.basis_u,
+                        basis_v=pa.profile.basis_v,
+                        origin_3d=pa.profile.origin_3d,
+                    )
+            elif loss_b < _POST_JOINT_MAX_TRIM_LOSS and intrusion_b:
+                combined = unary_union(intrusion_b)
+                try:
+                    new_outline = pb.profile.outline.difference(combined)
+                except Exception:
+                    continue
+                result = _clean_polygon(new_outline)
+                if result is not None and not result.is_empty and result.area > 1.0:
+                    pb.profile = PartProfile2D(
+                        outline=result,
+                        cutouts=pb.profile.cutouts,
+                        features=pb.profile.features,
+                        material_key=pb.profile.material_key,
+                        thickness_mm=pb.profile.thickness_mm,
+                        basis_u=pb.profile.basis_u,
+                        basis_v=pb.profile.basis_v,
+                        origin_3d=pb.profile.origin_3d,
+                    )
+            # else: both losses too high or no intrusion, skip
 
     return parts
 
@@ -4055,8 +4186,8 @@ def _constrain_outlines(
         )
     )
 
-    # Phase B: trim at plane-plane intersections
-    trimmed, trim_debug = _trim_at_plane_intersections(
+    # Phase B: trim at plane-plane intersections (slab subtraction)
+    trimmed, trim_debug = _trim_by_slab_subtraction(
         grown, input_spec, joint_pairs=joint_pairs
     )
 
@@ -4300,223 +4431,40 @@ def _deep_copy_part(part: ManufacturingPart) -> ManufacturingPart:
     )
 
 
-def _apply_trim_combination(
-    parts: List[ManufacturingPart],
-    groups: List[List[Tuple[int, int]]],
-    mask: int,
-) -> List[ManufacturingPart]:
-    """Apply one combination of trim directions and return the modified parts.
-
-    *groups* is a list of pair-groups.  Each group shares one decision bit:
-      bit=0 → for every (i, j) in the group, trim j against i's plane
-      bit=1 → for every (i, j) in the group, trim i against j's plane
-    """
-    copied = [_deep_copy_part(p) for p in parts]
-    for k, group in enumerate(groups):
-        for i, j in group:
-            pi = copied[i]
-            pj = copied[j]
-            n_i = _rotation_to_normal(pi.rotation_3d)
-            n_j = _rotation_to_normal(pj.rotation_3d)
-            slab_origin_i = np.asarray(pi.position_3d, dtype=float) + n_i * pi.thickness_mm
-            slab_origin_j = np.asarray(pj.position_3d, dtype=float) + n_j * pj.thickness_mm
-            if mask & (1 << k):
-                _trim_part_against_plane(pi, n_j, slab_origin_j, pj.thickness_mm)
-            else:
-                _trim_part_against_plane(pj, n_i, slab_origin_i, pi.thickness_mm)
-    return copied
-
-
-def _trim_loss_fraction(
-    part: ManufacturingPart,
-    other_normal: np.ndarray,
-    other_origin: np.ndarray,
-    other_thickness: float,
-) -> float:
-    """Return the fraction of part outline area removed by a trial trim.
-
-    Does NOT mutate the part — works on a copy.
-    """
-    area_before = part.profile.outline.area
-    if area_before < 1.0:
-        return 0.0
-    trial = _deep_copy_part(part)
-    _trim_part_against_plane(trial, other_normal, other_origin, other_thickness)
-    area_after = trial.profile.outline.area
-    return 1.0 - area_after / area_before
-
-
-_SIGNIFICANT_TRIM_THRESHOLD = 0.20  # 20 % area loss
-_MIN_SHARED_BOUNDARY_MM = 1.0  # Skip pairs with < 1mm shared intersection
-
-
-def _line_outline_segment(
-    part: ManufacturingPart,
-    line_point: np.ndarray,
-    line_dir: np.ndarray,
-) -> Optional[Tuple[float, float]]:
-    """Return (t_min, t_max) where 3D line passes through part's outline.
-
-    The line is parameterised as P(t) = line_point + t * line_dir.  We project
-    it into the part's 2D frame and intersect with the outline polygon.
-    The outline is buffered by the part's material thickness so that parts
-    meeting at their edges (within one thickness distance) still register a
-    shared boundary.
-    Returns None if the line doesn't cross the outline.
-    """
-    profile = part.profile
-    if profile.basis_u is None or profile.basis_v is None or profile.origin_3d is None:
-        return None
-
-    delta = line_point - profile.origin_3d
-    u0 = float(np.dot(profile.basis_u, delta))
-    v0 = float(np.dot(profile.basis_v, delta))
-    du = float(np.dot(profile.basis_u, line_dir))
-    dv = float(np.dot(profile.basis_v, line_dir))
-
-    if abs(du) < 1e-12 and abs(dv) < 1e-12:
-        return None  # Line perpendicular to this part's plane
-
-    T = 10000.0
-    line_2d = LineString([
-        (u0 - T * du, v0 - T * dv),
-        (u0 + T * du, v0 + T * dv),
-    ])
-
-    # Buffer by material thickness so edges meeting within one thickness
-    # distance still count as sharing a boundary.
-    check_outline = profile.outline.buffer(part.thickness_mm, quad_segs=2)
-
-    try:
-        inter = line_2d.intersection(check_outline)
-    except Exception:
-        return None
-
-    if inter.is_empty:
-        return None
-
-    # Collect all coordinates from the intersection geometry
-    coords: list = []
-    if inter.geom_type == "LineString":
-        coords = list(inter.coords)
-    elif inter.geom_type == "MultiLineString":
-        for ls in inter.geoms:
-            coords.extend(list(ls.coords))
-    elif inter.geom_type == "GeometryCollection":
-        for g in inter.geoms:
-            if g.geom_type == "LineString":
-                coords.extend(list(g.coords))
-    if len(coords) < 2:
-        return None
-
-    # Convert 2D coords back to t-parameter along the 3D line
-    use_u = abs(du) > abs(dv)
-    t_values = []
-    for u, v in coords:
-        t = (u - u0) / du if use_u else (v - v0) / dv
-        t_values.append(t)
-
-    return (min(t_values), max(t_values))
-
-
-def _shared_boundary_length(
-    pi: ManufacturingPart,
-    pj: ManufacturingPart,
-    n_i: np.ndarray,
-    n_j: np.ndarray,
-) -> float:
-    """Length (mm) of the plane-plane intersection line through BOTH outlines.
-
-    Two parts only need trim resolution if their planes' intersection line
-    passes through both finite outlines simultaneously — i.e. they share a
-    physical boundary.  If the intersection line misses one outline, the
-    infinite-plane trim is a phantom with no real material conflict.
-    """
-    L = np.cross(n_i, n_j)
-    L_norm = float(np.linalg.norm(L))
-    if L_norm < 1e-8:
-        return 0.0
-    L = L / L_norm
-
-    # A point on the intersection line (least-squares solution)
-    d_i = float(np.dot(n_i, pi.profile.origin_3d))
-    d_j = float(np.dot(n_j, pj.profile.origin_3d))
-    A = np.vstack([n_i, n_j])
-    P0 = np.linalg.lstsq(A, np.array([d_i, d_j]), rcond=None)[0]
-
-    seg_i = _line_outline_segment(pi, P0, L)
-    seg_j = _line_outline_segment(pj, P0, L)
-
-    if seg_i is None or seg_j is None:
-        return 0.0
-
-    overlap_start = max(seg_i[0], seg_j[0])
-    overlap_end = min(seg_i[1], seg_j[1])
-    return max(0.0, overlap_end - overlap_start)
-
-
-def _group_pairs_by_stack(
-    pairs: List[Tuple[int, int]],
-    parts: List[ManufacturingPart],
-) -> List[List[Tuple[int, int]]]:
-    """Group trim pairs that share the same stack-group combination.
-
-    Stacked siblings have the same plane orientation, so trimming any member
-    of stack A against any member of stack B produces nearly the same cut.
-    Grouping them into one decision bit collapses the search space.
-    """
-    key_to_pairs: Dict[Tuple[str, str], List[Tuple[int, int]]] = {}
-    for i, j in pairs:
-        sg_i = parts[i].metadata.get("stack_group_id", f"_solo_{i}")
-        sg_j = parts[j].metadata.get("stack_group_id", f"_solo_{j}")
-        key = (sg_i, sg_j)
-        key_to_pairs.setdefault(key, []).append((i, j))
-    return list(key_to_pairs.values())
-
-
-def _trim_at_plane_intersections(
+def _trim_by_slab_subtraction(
     parts: List[ManufacturingPart],
     input_spec: Step3Input,
     joint_pairs: Optional[Set[Tuple[int, int]]] = None,
 ) -> Tuple[List[ManufacturingPart], Dict[str, Any]]:
-    """Trim part outlines at plane-plane intersection boundaries.
+    """Trim part outlines by subtracting the exact slab-intrusion polygon.
 
-    A shared-boundary gate checks whether the plane-plane intersection line
-    passes through both finite outlines; pairs with no shared boundary are
-    skipped (the infinite-plane trim would be a phantom with no material
-    conflict).
+    For each non-parallel planar pair, compute the polygon where one part's
+    outline lies inside the other's material slab, then subtract it.  The
+    mutual-penetration gate (both parts must intrude each other's slab)
+    prevents phantom trims between parts that share a plane intersection
+    but are physically separated.
 
-    Surviving pairs are classified as *significant* (either direction removes
-    >20 % of a part's area) or *minor* (small corner clips / butt joints).
-    Minor pairs use lowest-loss-wins.  Significant pairs are grouped by stack
-    membership (stacked siblings share one decision bit) and searched
-    exhaustively over the group mask to maximise total outline area.
+    Collect-then-subtract: all intrusion polygons are gathered first, then
+    applied via unary_union so the result is order-independent.
     """
-    # -- Collect intersecting pairs and classify --
+    parts = [_deep_copy_part(p) for p in parts]
+
     trim_debug: Dict[str, Any] = {
-        "significant_trim_threshold": float(_SIGNIFICANT_TRIM_THRESHOLD),
         "pairs_considered_total": 0,
         "pairs_skipped_non_planar": 0,
         "pairs_skipped_missing_basis": 0,
         "pairs_skipped_parallel": 0,
+        "pairs_skipped_no_intrusion": 0,
+        "pairs_skipped_full_containment": 0,
+        "pairs_trimmed": 0,
         "pair_trials": [],
-        "minor_pairs_count": 0,
-        "significant_pairs_count": 0,
-        "minor_decisions": [],
-        "minor_mask": 0,
-        "significant_group_count": 0,
-        "significant_groups": [],
-        "search_mode": "none",
-        "fallback_used": False,
-        "best_mask": 0,
-        "best_score": 0.0,
-        "combos_evaluated": 0,
-        "joint_aware_pairs": len(joint_pairs) if joint_pairs else 0,
+        "search_mode": "slab_subtraction",
     }
     if joint_pairs is None:
         joint_pairs = set()
-    minor_pairs: List[Tuple[int, int, float, float]] = []  # (i, j, loss_i, loss_j)
-    significant_pairs: List[Tuple[int, int]] = []
+
+    # Phase 1: collect pending trim operations (target_idx, cut_polys, est_loss)
+    pending_trims: List[Tuple[int, List[Polygon], float]] = []
 
     for i in range(len(parts)):
         for j in range(i + 1, len(parts)):
@@ -4542,7 +4490,6 @@ def _trim_at_plane_intersections(
 
             n_i = _rotation_to_normal(pi.rotation_3d)
             n_j = _rotation_to_normal(pj.rotation_3d)
-
             cross_norm = float(np.linalg.norm(np.cross(n_i, n_j)))
             if cross_norm < 0.1:
                 trim_debug["pairs_skipped_parallel"] = (
@@ -4550,243 +4497,158 @@ def _trim_at_plane_intersections(
                 )
                 continue
 
-            # Volume gate: only trim if the plane-plane intersection line
-            # passes through both finite outlines (shared physical boundary).
-            shared = _shared_boundary_length(pi, pj, n_i, n_j)
-            if shared < _MIN_SHARED_BOUNDARY_MM:
-                continue
-
-            # Trial-trim both directions to measure area loss
+            # Gate: at least one part must penetrate the other's slab.
+            # Mutual penetration (min) is too strict for T-junctions where
+            # only the abutting part extends into the other's slab.  Using
+            # max catches both T-junctions and real overlaps while still
+            # filtering phantom pairs (neither part reaches the other).
             slab_origin_i = np.asarray(pi.position_3d, dtype=float) + n_i * pi.thickness_mm
             slab_origin_j = np.asarray(pj.position_3d, dtype=float) + n_j * pj.thickness_mm
-            loss_j = _trim_loss_fraction(pj, n_i, slab_origin_i, pi.thickness_mm)
-            loss_i = _trim_loss_fraction(pi, n_j, slab_origin_j, pj.thickness_mm)
-            pair_kind = (
-                "significant"
-                if (
-                    loss_i > _SIGNIFICANT_TRIM_THRESHOLD
-                    or loss_j > _SIGNIFICANT_TRIM_THRESHOLD
+            pen_i = _slab_penetration(pi.profile, n_j, slab_origin_j, pj.thickness_mm)
+            pen_j = _slab_penetration(pj.profile, n_i, slab_origin_i, pi.thickness_mm)
+            if max(pen_i, pen_j) <= 0.01:
+                trim_debug["pairs_skipped_no_intrusion"] = (
+                    int(trim_debug["pairs_skipped_no_intrusion"]) + 1
                 )
-                else "minor"
-            )
+                continue
+
+            # Compute exact intrusion polygons (thin strips inside slab)
+            intrusion_i = _slab_intrusion_polygon(pi, pj)
+            intrusion_j = _slab_intrusion_polygon(pj, pi)
+            area_i = parts[i].profile.outline.area
+            area_j = parts[j].profile.outline.area
+            frac_i = sum(p.area for p in intrusion_i) / max(area_i, 1e-6)
+            frac_j = sum(p.area for p in intrusion_j) / max(area_j, 1e-6)
+
+            if frac_i < 1e-6 and frac_j < 1e-6:
+                trim_debug["pairs_skipped_no_intrusion"] = (
+                    int(trim_debug["pairs_skipped_no_intrusion"]) + 1
+                )
+                continue
+
+            # Cross-projection gate: verify the intrusion region physically
+            # overlaps the target part's outline (not just its infinite slab).
+            # This catches phantom pairs where the slab plane crosses the source
+            # but the parts are spatially separated in-plane.
+            valid_i = _intrusion_overlaps_target(intrusion_i, pi, pj)
+            valid_j = _intrusion_overlaps_target(intrusion_j, pj, pi)
+            if not valid_i and not valid_j:
+                trim_debug["pairs_skipped_no_intrusion"] = (
+                    int(trim_debug["pairs_skipped_no_intrusion"]) + 1
+                )
+                continue
+
+            # Full containment guard: don't destroy parts entirely inside another's slab
+            if frac_i > 0.95 or frac_j > 0.95:
+                trim_debug["pairs_skipped_full_containment"] = (
+                    int(trim_debug["pairs_skipped_full_containment"]) + 1
+                )
+                continue
+
+            # Compute half-plane cut polygons (everything past slab entry face).
+            # These are used for the actual subtraction — non-fragmenting unlike
+            # thin strip intrusions.
+            cut_i = _slab_cut_polygon(pi, pj)
+            cut_j = _slab_cut_polygon(pj, pi)
+
+            # Direction: simulate both half-plane subtractions and pick lower loss.
+            # If only one direction has a non-empty cut polygon, always trim that.
+            def _effective_loss(outline: Polygon, polys: List[Polygon]) -> float:
+                if not polys:
+                    return float("inf")
+                try:
+                    diff = outline.difference(unary_union(polys))
+                except Exception:
+                    return float("inf")
+                cleaned = _clean_polygon(diff)
+                if cleaned is None or cleaned.is_empty:
+                    return outline.area
+                return outline.area - cleaned.area
+
+            loss_i = _effective_loss(pi.profile.outline, cut_i)
+            loss_j = _effective_loss(pj.profile.outline, cut_j)
+
+            # Pick lower-loss direction.
+            if loss_i <= loss_j:
+                if cut_i:
+                    pending_trims.append((i, cut_i, loss_i))
+                    direction = "trim_i"
+                else:
+                    direction = "skip_no_cut"
+            else:
+                if cut_j:
+                    pending_trims.append((j, cut_j, loss_j))
+                    direction = "trim_j"
+                else:
+                    direction = "skip_no_cut"
+
             trim_debug["pair_trials"].append(
                 {
                     "part_i": pi.part_id,
                     "part_j": pj.part_id,
-                    "loss_i": round(float(loss_i), 6),
-                    "loss_j": round(float(loss_j), 6),
+                    "frac_i": round(float(frac_i), 6),
+                    "frac_j": round(float(frac_j), 6),
+                    "loss_i": round(float(loss_i), 2),
+                    "loss_j": round(float(loss_j), 2),
                     "cross_norm": round(float(cross_norm), 6),
-                    "classification": pair_kind,
+                    "direction": direction,
                 }
             )
 
-            if (
-                loss_i > _SIGNIFICANT_TRIM_THRESHOLD
-                or loss_j > _SIGNIFICANT_TRIM_THRESHOLD
-            ):
-                significant_pairs.append((i, j))
-            else:
-                minor_pairs.append((i, j, loss_i, loss_j))
-    trim_debug["minor_pairs_count"] = int(len(minor_pairs))
-    trim_debug["significant_pairs_count"] = int(len(significant_pairs))
+    # Phase 2: apply cuts incrementally per part, smallest first.
+    # Track cumulative loss against the original area; skip any individual
+    # cut that would push total loss past the budget.  Small edge trims
+    # are applied first and preserved; large mid-panel cuts (which compound
+    # destructively when a part receives many trims) are naturally dropped
+    # once the budget is reached.
+    _MAX_TOTAL_TRIM_FRAC = 0.40
+    trim_regions: Dict[int, List[Polygon]] = {}
+    for idx, polys, _est_loss in pending_trims:
+        trim_regions.setdefault(idx, []).extend(polys)
 
-    if not minor_pairs and not significant_pairs:
-        return parts, trim_debug
+    for idx, polys in trim_regions.items():
+        original_outline = parts[idx].profile.outline
+        original_area = original_outline.area
+        if original_area < 1.0:
+            continue
+        # Sort ascending by polygon area — edge trims (small) first,
+        # mid-panel cuts (large) last.
+        polys_sorted = sorted(polys, key=lambda p: p.area)
+        current = original_outline
+        applied = 0
+        for poly in polys_sorted:
+            try:
+                candidate = current.difference(poly)
+            except Exception:
+                continue
+            cleaned = _clean_polygon(candidate)
+            if cleaned is None or cleaned.is_empty or cleaned.area < 1.0:
+                continue
+            cumulative_loss = original_area - cleaned.area
+            if cumulative_loss > _MAX_TOTAL_TRIM_FRAC * original_area:
+                trim_debug["cuts_dropped_overlimit"] = (
+                    int(trim_debug.get("cuts_dropped_overlimit", 0)) + 1
+                )
+                continue
+            current = cleaned
+            applied += 1
+        if applied > 0:
+            trim_debug["pairs_trimmed"] = (
+                int(trim_debug["pairs_trimmed"]) + applied
+            )
+            profile = parts[idx].profile
+            parts[idx].profile = PartProfile2D(
+                outline=current,
+                cutouts=profile.cutouts,
+                features=profile.features,
+                material_key=profile.material_key,
+                thickness_mm=profile.thickness_mm,
+                basis_u=profile.basis_u,
+                basis_v=profile.basis_v,
+                origin_3d=profile.origin_3d,
+            )
 
-    # -- Apply minor pairs: trim the part that extends past the other's boundary --
-    # Lowest-loss-wins: trim the part that loses less area (it's more "at its
-    # end").  Tie-break on area (larger area wins).
-    minor_groups = [[(i, j)] for i, j, _, _ in minor_pairs]
-    minor_mask = 0
-    for k, (i, j, loss_i, loss_j) in enumerate(minor_pairs):
-        decision = "trim_j"
-        if loss_i < loss_j:
-            # Part i loses less → i is more at its end → trim i
-            minor_mask |= 1 << k
-            decision = "trim_i"
-        elif loss_i == loss_j:
-            # Tie: trim the smaller-area part
-            if parts[i].profile.outline.area < parts[j].profile.outline.area:
-                minor_mask |= 1 << k
-                decision = "trim_i"
-            else:
-                decision = "trim_j_tie"
-        else:
-            decision = "trim_j"
-        trim_debug["minor_decisions"].append(
-            {
-                "group_index": int(k),
-                "part_i": parts[i].part_id,
-                "part_j": parts[j].part_id,
-                "loss_i": round(float(loss_i), 6),
-                "loss_j": round(float(loss_j), 6),
-                "decision": decision,
-                "mask_bit": int((minor_mask >> k) & 1),
-            }
-        )
-    trim_debug["minor_mask"] = int(minor_mask)
-    if minor_groups:
-        parts = _apply_trim_combination(parts, minor_groups, minor_mask)
-
-    if not significant_pairs:
-        trim_debug["search_mode"] = "minor_only"
-        trim_debug["best_mask"] = int(minor_mask)
-        trim_debug["best_score"] = 0.0
-        return parts, trim_debug
-
-    # -- Group significant pairs by stack membership --
-    sig_groups = _group_pairs_by_stack(significant_pairs, parts)
-    n_groups = len(sig_groups)
-    trim_debug["significant_group_count"] = int(n_groups)
-    sig_group_rows: List[Dict[str, Any]] = []
-    for k, group in enumerate(sig_groups):
-        i0, j0 = group[0]
-        sg_i = str(parts[i0].metadata.get("stack_group_id", f"_solo_{i0}"))
-        sg_j = str(parts[j0].metadata.get("stack_group_id", f"_solo_{j0}"))
-        sig_group_rows.append(
-            {
-                "group_index": int(k),
-                "stack_key": [sg_i, sg_j],
-                "pairs": [
-                    {
-                        "part_i": parts[i].part_id,
-                        "part_j": parts[j].part_id,
-                    }
-                    for i, j in group
-                ],
-            }
-        )
-    trim_debug["significant_groups"] = sig_group_rows
-
-    # -- Safety valve on GROUP count (not raw pair count) --
-    if n_groups > 16:
-        fallback_mask = 0
-        for k, group in enumerate(sig_groups):
-            i, j = group[0]
-            area_i = parts[i].source_area_mm2
-            area_j = parts[j].source_area_mm2
-            if area_i < area_j:
-                fallback_mask |= 1 << k
-        trim_debug["search_mode"] = "significant_fallback"
-        trim_debug["fallback_used"] = True
-        trim_debug["best_mask"] = int(fallback_mask)
-        trim_debug["best_score"] = 0.0
-        trim_debug["combos_evaluated"] = 0
-        return _apply_trim_combination(parts, sig_groups, fallback_mask), trim_debug
-
-    # -- Exhaustive search over group bits --
-    # Score rewards useful area (capped at source geometry) and penalizes
-    # excess bbox padding that Phase C will clip away.  This prevents
-    # inflated bounding boxes from biasing trim direction decisions.
-    best_mask = 0
-    best_score = -float("inf")
-    n_combos = 1 << n_groups
-
-    for mask in range(n_combos):
-        candidate = _apply_trim_combination(parts, sig_groups, mask)
-        score = sum(
-            2.0 * min(p.profile.outline.area, p.source_area_mm2)
-            - p.profile.outline.area
-            for p in candidate
-        )
-        if score > best_score:
-            best_score = score
-            best_mask = mask
-    trim_debug["search_mode"] = "significant_exhaustive"
-    trim_debug["best_mask"] = int(best_mask)
-    trim_debug["best_score"] = float(best_score)
-    trim_debug["combos_evaluated"] = int(n_combos)
-    return _apply_trim_combination(parts, sig_groups, best_mask), trim_debug
-
-
-def _trim_part_against_plane(
-    part: ManufacturingPart,
-    other_normal: np.ndarray,
-    other_origin: np.ndarray,
-    other_thickness_mm: float = 0.0,
-) -> None:
-    """Trim a part's outline to stay on its side of another part's plane.
-
-    Uses the half-plane inequality: n_other . (origin + u*x + v*y) >= d_other
-    which becomes a*x + b*y >= c in the part's 2D frame.
-
-    The cutting plane is offset to the *nearest* face of the winning part's
-    material slab.  The slab occupies [d_surface - thickness, d_surface] along
-    the other normal.  When the trimmed part sits on the normal side
-    (d_trimmed >= d_surface) the nearest face is the surface itself; when it
-    sits on the anti-normal side the nearest face is the far face at
-    d_surface - thickness.
-    """
-    profile = part.profile
-    if profile.basis_u is None or profile.basis_v is None or profile.origin_3d is None:
-        return
-
-    a = float(np.dot(other_normal, profile.basis_u))
-    b = float(np.dot(other_normal, profile.basis_v))
-    # Determine which face of the winning slab is closest to the trimmed part.
-    d_surface = float(np.dot(other_normal, other_origin))
-    trimmed_d = float(np.dot(other_normal, profile.origin_3d))
-    if trimmed_d >= d_surface:
-        # Trimmed part on normal side → nearest face is the surface
-        d_other = d_surface
-    else:
-        # Trimmed part on anti-normal side → nearest face is the far face
-        d_other = d_surface - other_thickness_mm
-    c = d_other - float(np.dot(other_normal, profile.origin_3d))
-
-    ab_norm = math.sqrt(a * a + b * b)
-    if ab_norm < 1e-8:
-        return  # Other plane is parallel in this 2D projection
-
-    # Determine which side of the half-plane the outline centroid is on
-    cx = float(profile.outline.centroid.x)
-    cy = float(profile.outline.centroid.y)
-    centroid_side = a * cx + b * cy - c
-
-    if centroid_side >= 0:
-        # Centroid is on the >= side, keep that side (a*x + b*y >= c)
-        line_normal_2d = np.array([a, b]) / ab_norm
-    else:
-        # Centroid is on the < side, keep the opposite half-plane (a*x + b*y <= c)
-        # Equivalently: (-a)*x + (-b)*y >= -c
-        line_normal_2d = np.array([-a, -b]) / ab_norm
-
-    line_dir_2d = np.array([-line_normal_2d[1], line_normal_2d[0]])
-
-    # A point on the boundary line a*x + b*y = c
-    if abs(a) > abs(b):
-        line_pt = np.array([c / a, 0.0])
-    else:
-        line_pt = np.array([0.0, c / b])
-
-    # Build a large half-plane polygon
-    bounds = profile.outline.bounds
-    extent = max(bounds[2] - bounds[0], bounds[3] - bounds[1], 100.0) * 3.0
-
-    p1 = line_pt - extent * line_dir_2d
-    p2 = line_pt + extent * line_dir_2d
-    p3 = p2 + extent * line_normal_2d
-    p4 = p1 + extent * line_normal_2d
-
-    half_plane = Polygon([tuple(p1), tuple(p2), tuple(p3), tuple(p4)])
-
-    try:
-        result = profile.outline.intersection(half_plane)
-    except Exception:
-        return
-
-    result = _clean_polygon(result)
-    if result is not None and not result.is_empty and result.area > 1.0:
-        part.profile = PartProfile2D(
-            outline=result,
-            cutouts=profile.cutouts,
-            features=profile.features,
-            material_key=profile.material_key,
-            thickness_mm=profile.thickness_mm,
-            basis_u=profile.basis_u,
-            basis_v=profile.basis_v,
-            origin_3d=profile.origin_3d,
-        )
+    return parts, trim_debug
 
 
 def _split_oversized_part(

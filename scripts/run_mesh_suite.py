@@ -456,13 +456,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ),
                 "step2_trim_minor_pairs_count": int(
                     (debug.get("step2_trim_debug", {}) or {}).get(
-                        "minor_pairs_count", 0
+                        "minor_pairs_count",
+                        (debug.get("step2_trim_debug", {}) or {}).get(
+                            "pairs_skipped_no_intrusion", 0
+                        ),
                     )
                     or 0
                 ),
                 "step2_trim_significant_pairs_count": int(
                     (debug.get("step2_trim_debug", {}) or {}).get(
-                        "significant_pairs_count", 0
+                        "significant_pairs_count",
+                        (debug.get("step2_trim_debug", {}) or {}).get(
+                            "pairs_trimmed", 0
+                        ),
                     )
                     or 0
                 ),
