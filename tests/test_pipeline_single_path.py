@@ -32,7 +32,13 @@ def test_pipeline_creates_run_folder_structure(box_mesh_file: str, tmp_path: Pat
     assert (run_dir / "manifest.json").exists()
     assert (run_dir / "metrics.json").exists()
     assert (run_dir / "summary.md").exists()
+    snapshots_dir = run_dir / "artifacts" / "snapshots"
+    assert snapshots_dir.exists()
+    capsules = sorted(snapshots_dir.glob("spatial_capsule_phase_*.json"))
+    assert capsules, "Expected spatial capsule files alongside phase snapshots"
 
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["strategy"] == "first_principles_step3"
     assert manifest["run_id"] == result.run_id
+    artifacts = manifest.get("artifacts", {})
+    assert len(artifacts.get("phase_spatial_capsules", [])) >= 1

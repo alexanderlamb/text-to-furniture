@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from dxf_exporter import design_to_dxf, design_to_nested_dxf
@@ -22,6 +24,19 @@ from step3_first_principles import Step3Input, Step3Output, decompose_first_prin
 from svg_exporter import design_to_nested_svg, design_to_svg
 
 logger = logging.getLogger(__name__)
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from src_v2.spatial_capsule import (
+        emit_spatial_capsule_from_snapshot_payload,
+        write_spatial_capsule_json,
+    )
+except Exception:
+    emit_spatial_capsule_from_snapshot_payload = None
+    write_spatial_capsule_json = None
 
 
 @dataclass
@@ -85,6 +100,7 @@ def run_pipeline_from_mesh(
     # Write phase snapshots for step-through debugging
     phase_snapshots = step3.debug.get("phase_snapshots", [])
     snapshot_paths: List[str] = []
+    spatial_capsule_paths: List[str] = []
     if phase_snapshots:
         snapshots_dir = paths.artifacts_dir / "snapshots"
         snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +116,23 @@ def run_pipeline_from_mesh(
             snap_path = snapshots_dir / fname
             write_json(snap_path, snap)
             snapshot_paths.append(str(snap_path))
+            if (
+                emit_spatial_capsule_from_snapshot_payload is not None
+                and write_spatial_capsule_json is not None
+                and isinstance(snap, dict)
+            ):
+                try:
+                    capsule = emit_spatial_capsule_from_snapshot_payload(snap)
+                    capsule_name = f"spatial_capsule_phase_{snap['phase_index']:02d}_{label_slug}.json"
+                    capsule_path = snapshots_dir / capsule_name
+                    write_spatial_capsule_json(capsule_path, capsule)
+                    spatial_capsule_paths.append(str(capsule_path))
+                except Exception as exc:
+                    logger.debug(
+                        "Spatial capsule generation skipped for phase %s: %s",
+                        snap.get("phase_index"),
+                        exc,
+                    )
 
     # Compact machine-readable debug trace for agents/tools.
     debug_trace_path = paths.artifacts_dir / "debug_trace.json"
@@ -121,6 +154,7 @@ def run_pipeline_from_mesh(
         {
             "run_id": paths.run_id,
             "phase_snapshot_paths": snapshot_paths,
+            "phase_spatial_capsule_paths": spatial_capsule_paths,
             "phase_diagnostics": phase_diagnostics,
             "step3_debug": {
                 k: v for k, v in step3.debug.items() if k != "phase_snapshots"
@@ -202,6 +236,7 @@ def run_pipeline_from_mesh(
             "summary": str(paths.summary_path),
             "debug_trace": str(debug_trace_path),
             "phase_snapshots": snapshot_paths,
+            "phase_spatial_capsules": spatial_capsule_paths,
             "svg": svg_paths,
             "nested_svg": nested_svg_path,
             "dxf": dxf_paths,

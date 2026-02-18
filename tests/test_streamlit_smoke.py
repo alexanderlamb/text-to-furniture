@@ -76,7 +76,9 @@ def test_data_list_suite_runs(tmp_path: Path):
     suite_dir = tmp_path / "suites" / "20260101_000000_suite"
     suite_dir.mkdir(parents=True, exist_ok=True)
     (suite_dir / "manifest.json").write_text(
-        json.dumps({"suite_name": "smoke_suite", "created_utc": "2026-01-01T00:00:00Z"}),
+        json.dumps(
+            {"suite_name": "smoke_suite", "created_utc": "2026-01-01T00:00:00Z"}
+        ),
         encoding="utf-8",
     )
     (suite_dir / "results.json").write_text(
@@ -128,3 +130,33 @@ def test_data_suite_rows_by_case():
 def test_streamlit_module_has_main():
     module = _load_app_module()
     assert hasattr(module, "main")
+
+
+def test_streamlit_spatial_capsule_transition_summary():
+    module = _load_app_module()
+    before = {
+        "parts": [
+            {"part_id": "A", "obb": {"center": [0.0, 0.0, 0.0]}},
+            {"part_id": "B", "obb": {"center": [10.0, 0.0, 0.0]}},
+        ],
+        "relations": [{"part_a": "A", "part_b": "B", "class": "overlapping"}],
+    }
+    after = {
+        "parts": [
+            {"part_id": "A", "obb": {"center": [2.0, 0.0, 0.0]}},
+            {"part_id": "C", "obb": {"center": [10.0, 2.0, 0.0]}},
+        ],
+        "relations": [{"part_a": "A", "part_b": "C", "class": "jointed"}],
+    }
+
+    summary = module._build_spatial_capsule_transition(before, after)
+    assert summary["parts_before"] == 2
+    assert summary["parts_after"] == 2
+    assert summary["parts_added"] == ["C"]
+    assert summary["parts_removed"] == ["B"]
+    assert summary["relation_pairs_added"] == [["A", "C"]]
+    assert summary["relation_pairs_removed"] == [["A", "B"]]
+    assert summary["overlap_pairs_before"] == 1
+    assert summary["overlap_pairs_after"] == 0
+    assert summary["class_counts_after"]["jointed"] == 1
+    assert summary["max_part_motion_mm"] == 2.0

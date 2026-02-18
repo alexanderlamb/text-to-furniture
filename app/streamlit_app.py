@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -714,6 +716,268 @@ def _cached_snapshot_scene(
     )
 
 
+_SPATIAL_CAPSULE_PHASE_RE = re.compile(r"^spatial_capsule_phase_(\d+)(?:_(.+))?$")
+
+
+def _spatial_capsule_phase_meta(path: Path) -> Tuple[int, str]:
+    match = _SPATIAL_CAPSULE_PHASE_RE.match(path.stem)
+    if match is None:
+        return (10**9, path.stem)
+    phase_idx = int(match.group(1))
+    raw_label = str(match.group(2) or f"phase-{phase_idx:02d}")
+    pretty = raw_label.replace("-", " ").strip() or f"phase {phase_idx:02d}"
+    return (phase_idx, pretty)
+
+
+def _spatial_capsule_part_map(payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    raw_parts = payload.get("parts", [])
+    if not isinstance(raw_parts, list):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for item in raw_parts:
+        if not isinstance(item, dict):
+            continue
+        part_id = str(item.get("part_id", "")).strip()
+        if part_id:
+            out[part_id] = item
+    return out
+
+
+def _spatial_capsule_relation_map(payload: Dict[str, Any]) -> Dict[Tuple[str, str], str]:
+    raw_relations = payload.get("relations", [])
+    if not isinstance(raw_relations, list):
+        return {}
+    out: Dict[Tuple[str, str], str] = {}
+    for rel in raw_relations:
+        if not isinstance(rel, dict):
+            continue
+        part_a = str(rel.get("part_a", "")).strip()
+        part_b = str(rel.get("part_b", "")).strip()
+        if not part_a or not part_b or part_a == part_b:
+            continue
+        key = tuple(sorted((part_a, part_b)))
+        out[key] = str(rel.get("class", "")).strip().lower()
+    return out
+
+
+def _spatial_capsule_class_counts(
+    relation_map: Dict[Tuple[str, str], str],
+) -> Dict[str, int]:
+    counts: Counter[str] = Counter()
+    for cls in relation_map.values():
+        if cls:
+            counts[cls] += 1
+    return dict(sorted(counts.items()))
+
+
+def _spatial_capsule_part_center(part_payload: Dict[str, Any]) -> Optional[np.ndarray]:
+    obb = part_payload.get("obb", {})
+    if isinstance(obb, dict):
+        center = obb.get("center")
+        if isinstance(center, list) and len(center) == 3:
+            try:
+                return np.asarray(center, dtype=float)
+            except Exception:
+                pass
+    origin = part_payload.get("origin_3d")
+    if isinstance(origin, list) and len(origin) == 3:
+        try:
+            return np.asarray(origin, dtype=float)
+        except Exception:
+            return None
+    return None
+
+
+def _build_spatial_capsule_transition(
+    before: Dict[str, Any], after: Dict[str, Any]
+) -> Dict[str, Any]:
+    before_parts = _spatial_capsule_part_map(before)
+    after_parts = _spatial_capsule_part_map(after)
+    before_rel = _spatial_capsule_relation_map(before)
+    after_rel = _spatial_capsule_relation_map(after)
+
+    before_ids = set(before_parts.keys())
+    after_ids = set(after_parts.keys())
+    parts_added = sorted(after_ids - before_ids)
+    parts_removed = sorted(before_ids - after_ids)
+    common_ids = sorted(before_ids & after_ids)
+
+    before_rel_keys = set(before_rel.keys())
+    after_rel_keys = set(after_rel.keys())
+    rel_added = sorted(after_rel_keys - before_rel_keys)
+    rel_removed = sorted(before_rel_keys - after_rel_keys)
+
+    rel_changed: List[Dict[str, Any]] = []
+    for pair in sorted(before_rel_keys & after_rel_keys):
+        cls_before = before_rel[pair]
+        cls_after = after_rel[pair]
+        if cls_before != cls_after:
+            rel_changed.append(
+                {
+                    "pair": [pair[0], pair[1]],
+                    "before": cls_before,
+                    "after": cls_after,
+                }
+            )
+
+    before_counts = _spatial_capsule_class_counts(before_rel)
+    after_counts = _spatial_capsule_class_counts(after_rel)
+    classes = sorted(set(before_counts.keys()) | set(after_counts.keys()))
+    class_delta = {
+        cls: int(after_counts.get(cls, 0)) - int(before_counts.get(cls, 0))
+        for cls in classes
+    }
+
+    max_part_motion = 0.0
+    for part_id in common_ids:
+        c_before = _spatial_capsule_part_center(before_parts[part_id])
+        c_after = _spatial_capsule_part_center(after_parts[part_id])
+        if c_before is None or c_after is None:
+            continue
+        max_part_motion = max(max_part_motion, float(np.linalg.norm(c_after - c_before)))
+
+    return {
+        "parts_before": len(before_parts),
+        "parts_after": len(after_parts),
+        "relations_before": len(before_rel),
+        "relations_after": len(after_rel),
+        "parts_added": parts_added,
+        "parts_removed": parts_removed,
+        "relation_pairs_added": [[a, b] for a, b in rel_added],
+        "relation_pairs_removed": [[a, b] for a, b in rel_removed],
+        "relation_class_changes": rel_changed,
+        "class_counts_before": before_counts,
+        "class_counts_after": after_counts,
+        "class_count_delta": class_delta,
+        "overlap_pairs_before": int(before_counts.get("overlapping", 0)),
+        "overlap_pairs_after": int(after_counts.get("overlapping", 0)),
+        "max_part_motion_mm": float(max_part_motion),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def _cached_spatial_capsule_transitions(run_dir: str) -> List[Dict[str, Any]]:
+    snapshots_dir = Path(run_dir) / "artifacts" / "snapshots"
+    if not snapshots_dir.is_dir():
+        return []
+
+    capsule_files = sorted(
+        snapshots_dir.glob("spatial_capsule_phase_*.json"),
+        key=lambda p: (_spatial_capsule_phase_meta(p)[0], p.name),
+    )
+    if len(capsule_files) < 2:
+        return []
+
+    parsed: List[Tuple[Path, Dict[str, Any], int, str]] = []
+    for path in capsule_files:
+        payload = read_json(path)
+        if not isinstance(payload, dict):
+            continue
+        phase_idx, phase_label = _spatial_capsule_phase_meta(path)
+        parsed.append((path, payload, phase_idx, phase_label))
+
+    if len(parsed) < 2:
+        return []
+
+    transitions: List[Dict[str, Any]] = []
+    for idx in range(1, len(parsed)):
+        prev_path, prev_payload, prev_phase_idx, prev_label = parsed[idx - 1]
+        curr_path, curr_payload, curr_phase_idx, curr_label = parsed[idx]
+        delta = _build_spatial_capsule_transition(prev_payload, curr_payload)
+        delta.update(
+            {
+                "from_file": prev_path.name,
+                "to_file": curr_path.name,
+                "from_phase_index": int(prev_phase_idx),
+                "to_phase_index": int(curr_phase_idx),
+                "from_phase_label": prev_label,
+                "to_phase_label": curr_label,
+            }
+        )
+        transitions.append(delta)
+    return transitions
+
+
+def _render_spatial_capsule_diff(run_dir: str, key: str) -> None:
+    transitions = _cached_spatial_capsule_transitions(run_dir)
+    if not transitions:
+        return
+
+    with st.expander("Spatial Capsule Diffs", expanded=False):
+        rows = []
+        for t in transitions:
+            rows.append(
+                {
+                    "transition": (
+                        f"{t['from_phase_index']:02d} {t['from_phase_label']} -> "
+                        f"{t['to_phase_index']:02d} {t['to_phase_label']}"
+                    ),
+                    "part_delta": int(t["parts_after"]) - int(t["parts_before"]),
+                    "relation_delta": int(t["relations_after"])
+                    - int(t["relations_before"]),
+                    "overlap_delta": int(t["overlap_pairs_after"])
+                    - int(t["overlap_pairs_before"]),
+                    "class_changes": len(t["relation_class_changes"]),
+                    "max_motion_mm": round(float(t["max_part_motion_mm"]), 3),
+                }
+            )
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        sel = st.selectbox(
+            "Transition detail",
+            range(len(transitions)),
+            format_func=lambda i: (
+                f"{transitions[i]['from_phase_index']:02d} {transitions[i]['from_phase_label']} -> "
+                f"{transitions[i]['to_phase_index']:02d} {transitions[i]['to_phase_label']}"
+            ),
+            key=f"{key}-scd-sel",
+        )
+        chosen = transitions[sel]
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric(
+            "Parts",
+            int(chosen["parts_after"]),
+            delta=int(chosen["parts_after"]) - int(chosen["parts_before"]),
+        )
+        c2.metric(
+            "Relations",
+            int(chosen["relations_after"]),
+            delta=int(chosen["relations_after"]) - int(chosen["relations_before"]),
+        )
+        c3.metric(
+            "Overlaps",
+            int(chosen["overlap_pairs_after"]),
+            delta=int(chosen["overlap_pairs_after"])
+            - int(chosen["overlap_pairs_before"]),
+        )
+        c4.metric("Class changes", len(chosen["relation_class_changes"]))
+        c5.metric("Max motion", f"{float(chosen['max_part_motion_mm']):.2f} mm")
+
+        if chosen["parts_added"]:
+            st.write("Added parts:", ", ".join(chosen["parts_added"]))
+        if chosen["parts_removed"]:
+            st.write("Removed parts:", ", ".join(chosen["parts_removed"]))
+
+        show_json = st.checkbox(
+            "Show raw transition JSON",
+            value=False,
+            key=f"{key}-scd-json",
+        )
+        if show_json:
+            st.json(chosen)
+            st.download_button(
+                "Download transition JSON",
+                data=json.dumps(chosen, indent=2) + "\n",
+                file_name=(
+                    f"spatial_capsule_diff_{chosen['from_phase_index']:02d}_"
+                    f"to_{chosen['to_phase_index']:02d}.json"
+                ),
+                mime="application/json",
+                key=f"{key}-scd-dl",
+            )
+
+
 def _render_phase_stepper(run_dir: str, key: str) -> None:
     """Show a slider to step through pipeline phase snapshots."""
     snapshots_dir = Path(run_dir) / "artifacts" / "snapshots"
@@ -995,6 +1259,24 @@ def _render_launch_panel(suites_dir: str) -> None:
         suite_file = st.text_input(
             "Suite file", value="benchmarks/mesh_suite.json", key="launch-suite-file"
         )
+        c1, c2 = st.columns(2)
+        strict_no_overlap = c1.checkbox(
+            "Strict no-overlap",
+            value=False,
+            key="launch-strict-no-overlap",
+            help="Pass --step3-enforce-zero-overlap to suite runs.",
+        )
+        trim_workers = int(
+            c2.number_input(
+                "Trim workers",
+                min_value=0,
+                max_value=64,
+                value=0,
+                step=1,
+                key="launch-trim-workers",
+                help="Pass --step3-trim-parallel-workers (0 keeps script default).",
+            )
+        )
         if st.button(
             "Launch", key="launch-btn", disabled="suite_process" in st.session_state
         ):
@@ -1004,15 +1286,20 @@ def _render_launch_panel(suites_dir: str) -> None:
             if not suite_path.is_file():
                 st.error(f"Suite file not found: {suite_path}")
             else:
+                cmd = [
+                    str(ROOT / "venv" / "bin" / "python3"),
+                    str(ROOT / "scripts" / "run_mesh_suite.py"),
+                    "--suite-file",
+                    str(suite_path),
+                    "--suites-dir",
+                    suites_dir,
+                ]
+                if strict_no_overlap:
+                    cmd.append("--step3-enforce-zero-overlap")
+                if trim_workers > 0:
+                    cmd.extend(["--step3-trim-parallel-workers", str(trim_workers)])
                 proc = subprocess.Popen(
-                    [
-                        str(ROOT / "venv" / "bin" / "python3"),
-                        str(ROOT / "scripts" / "run_mesh_suite.py"),
-                        "--suite-file",
-                        str(suite_path),
-                        "--suites-dir",
-                        suites_dir,
-                    ],
+                    cmd,
                     cwd=str(ROOT),
                 )
                 st.session_state["suite_process"] = proc
@@ -1165,6 +1452,7 @@ def _render_suite_review(suites_dir: str) -> None:
         _render_metrics_row(metrics)
         _render_overlay(run_dir, metrics, key=f"sc-{case_idx}")
         _render_phase_stepper(run_dir, key=f"sc-ps-{case_idx}")
+        _render_spatial_capsule_diff(run_dir, key=f"sc-scd-{case_idx}")
         _render_violations(metrics)
         with st.expander("SVG / Artifacts"):
             _render_artifacts(run_dir, key=f"sa-{case_idx}")
@@ -1239,6 +1527,7 @@ def _render_run_detail(runs_dir: str) -> None:
     _render_metrics_row(metrics)
     _render_overlay(run_dir, metrics, key=f"rd-{run_idx}")
     _render_phase_stepper(run_dir, key=f"rd-ps-{run_idx}")
+    _render_spatial_capsule_diff(run_dir, key=f"rd-scd-{run_idx}")
     _render_violations(metrics)
     with st.expander("SVG / Artifacts"):
         _render_artifacts(run_dir, key=f"ra-{run_idx}")
