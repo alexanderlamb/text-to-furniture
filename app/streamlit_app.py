@@ -1,1556 +1,752 @@
-"""Minimal visual review tool — two tabs for inspecting pipeline outputs."""
+"""Step 1 dashboard for OpenSCAD panelization runs."""
 
 from __future__ import annotations
 
-import math
-import re
+import json
 import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List
 
 import numpy as np
-import streamlit as st
-from scipy.spatial.transform import Rotation
-from shapely.geometry import MultiPolygon, Polygon
-from shapely.ops import triangulate
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from data import (
-    artifact_files,
-    infer_failure_modes,
-    list_runs,
-    list_suite_runs,
-    read_json,
-    read_suite_progress,
-    safe_float,
-    status_badge,
-    suite_rows_by_case,
-)
-from overlay_viewer import OverlaySceneData, build_overlay_scene
+import streamlit as st
+
+from data import artifact_files, list_runs, read_json
 
 try:
     import plotly.graph_objects as go
 except ModuleNotFoundError:
     go = None
 
-DEFAULT_MAX_MESH_FACES = 8000
-PREVIEW_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+try:
+    from shapely.geometry import MultiPolygon, Polygon
+    from shapely.ops import triangulate
+except ModuleNotFoundError:
+    MultiPolygon = None
+    Polygon = None
+    triangulate = None
 
 
-# ---------------------------------------------------------------------------
-# Helpers: table selection
-# ---------------------------------------------------------------------------
+def _python_executable() -> str:
+    preferred = ROOT / "venv" / "bin" / "python3"
+    return str(preferred) if preferred.exists() else sys.executable
 
 
-def _selected_rows(event: Any) -> List[int]:
-    if event is None:
-        return []
-    if isinstance(event, dict):
-        sel = event.get("selection", {})
-        rows = sel.get("rows", [])
-        return rows if isinstance(rows, list) else []
-    sel = getattr(event, "selection", None)
-    if sel is None:
-        return []
-    if isinstance(sel, dict):
-        rows = sel.get("rows", [])
-        return rows if isinstance(rows, list) else []
-    rows = getattr(sel, "rows", None)
-    return rows if isinstance(rows, list) else []
+def _run_step1(
+    mesh_path: str,
+    design_name: str,
+    runs_dir: str,
+    material_key: str,
+    thickness_mm: float | None,
+    part_budget: int,
+    auto_scale: bool,
+    target_height_mm: float,
+) -> subprocess.CompletedProcess[str]:
+    cmd: List[str] = [
+        _python_executable(),
+        str(ROOT / "scripts" / "generate_openscad_step1.py"),
+        "--mesh",
+        mesh_path,
+        "--name",
+        design_name,
+        "--runs-dir",
+        runs_dir,
+        "--material-key",
+        material_key,
+        "--part-budget",
+        str(part_budget),
+        "--target-height-mm",
+        str(target_height_mm),
+    ]
+    if thickness_mm is not None:
+        cmd.extend(["--thickness-mm", str(thickness_mm)])
+    if not auto_scale:
+        cmd.append("--no-auto-scale")
+
+    return subprocess.run(cmd, capture_output=True, text=True)
 
 
-# ---------------------------------------------------------------------------
-# 3D Overlay rendering (Plotly primary, matplotlib fallback)
-# ---------------------------------------------------------------------------
+def _load_artifact(
+    manifest: Dict[str, Any], run_dir: Path, key: str, fallback: str
+) -> Dict[str, Any]:
+    artifact_path = manifest.get("artifacts", {}).get(key)
+    if artifact_path:
+        return read_json(Path(artifact_path))
+    return read_json(run_dir / "artifacts" / fallback)
 
 
-@st.cache_data(show_spinner=False)
-def _cached_scene(run_dir: str, space: str, max_faces: int) -> OverlaySceneData:
-    return build_overlay_scene(run_dir, space=space, max_mesh_faces=max_faces)
+def _relation_counts(capsule: Dict[str, Any]) -> Dict[str, int]:
+    relations = capsule.get("relations", [])
+    if not isinstance(relations, list):
+        return {}
+    counter: Counter[str] = Counter()
+    for relation in relations:
+        if not isinstance(relation, dict):
+            continue
+        relation_class = str(relation.get("class", "unknown"))
+        counter[relation_class] += 1
+    return dict(counter)
 
 
-def _hex_to_rgba(hex_color: str, alpha: float) -> tuple:
-    c = hex_color.lstrip("#")
-    if len(c) != 6:
-        return (0.2, 0.6, 0.9, alpha)
-    return (int(c[0:2], 16) / 255, int(c[2:4], 16) / 255, int(c[4:6], 16) / 255, alpha)
+def _render_centers_plot(capsule: Dict[str, Any]) -> None:
+    if go is None:
+        st.info("Install plotly to render 3D part centers.")
+        return
 
+    parts = capsule.get("parts", [])
+    if not isinstance(parts, list) or not parts:
+        st.info("No parts available in spatial capsule.")
+        return
 
-class _OverlapPatch:
-    __slots__ = ("part_id", "fill_vertices", "fill_faces", "edge_loops")
-
-    def __init__(
-        self,
-        part_id: str,
-        fill_vertices: np.ndarray,
-        fill_faces: np.ndarray,
-        edge_loops: List[np.ndarray],
-    ) -> None:
-        self.part_id = part_id
-        self.fill_vertices = fill_vertices
-        self.fill_faces = fill_faces
-        self.edge_loops = edge_loops
-
-
-@st.cache_data(show_spinner=False)
-def _part_payload_map(payload_path: str) -> Dict[str, Dict[str, Any]]:
-    payload = read_json(Path(payload_path))
-    parts = payload.get("parts", [])
-    out: Dict[str, Dict[str, Any]] = {}
-    if not isinstance(parts, list):
-        return out
-    for idx, part in enumerate(parts):
+    xs: List[float] = []
+    ys: List[float] = []
+    zs: List[float] = []
+    labels: List[str] = []
+    for part in parts:
         if not isinstance(part, dict):
             continue
-        part_id = str(part.get("part_id", f"part_{idx:02d}")).strip()
-        if not part_id:
+        obb = part.get("obb", {})
+        center = (
+            obb.get("center", [0.0, 0.0, 0.0])
+            if isinstance(obb, dict)
+            else [0.0, 0.0, 0.0]
+        )
+        if not isinstance(center, list) or len(center) != 3:
             continue
-        out[part_id] = part
-    return out
+        xs.append(float(center[0]))
+        ys.append(float(center[1]))
+        zs.append(float(center[2]))
+        labels.append(str(part.get("part_id", "part")))
+
+    if not xs:
+        st.info("No plottable part centers.")
+        return
+
+    fig = go.Figure(
+        data=[
+            go.Scatter3d(
+                x=xs,
+                y=ys,
+                z=zs,
+                mode="markers+text",
+                marker={"size": 5},
+                text=labels,
+                textposition="top center",
+            )
+        ]
+    )
+    fig.update_layout(
+        margin={"l": 0, "r": 0, "t": 20, "b": 0},
+        scene={
+            "xaxis_title": "X (mm)",
+            "yaxis_title": "Y (mm)",
+            "zaxis_title": "Z (mm)",
+        },
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
-def _rotation_matrix_xyz(rotation_xyz: List[float]) -> np.ndarray:
-    angles = np.asarray(rotation_xyz, dtype=float)
-    return Rotation.from_euler("xyz", angles).as_matrix()
-
-
-def _outline_polygon(outline_2d: Any) -> Optional[Polygon]:
-    if not isinstance(outline_2d, list) or len(outline_2d) < 3:
-        return None
-    shell = np.asarray(outline_2d, dtype=float)
-    if shell.shape[0] < 3:
-        return None
-    if np.allclose(shell[0], shell[-1]):
-        shell = shell[:-1]
-    if shell.shape[0] < 3:
-        return None
-    poly = Polygon(shell.tolist())
-    if poly.is_empty:
-        return None
-    poly = poly if poly.is_valid else poly.buffer(0)
-    if poly.is_empty:
-        return None
-    if isinstance(poly, MultiPolygon):
-        poly = max(poly.geoms, key=lambda g: g.area)
-    if not isinstance(poly, Polygon) or poly.area <= 1e-6:
-        return None
-    return poly
-
-
-def _geometry_to_polygons(geom: Any) -> List[Polygon]:
-    if geom is None or geom.is_empty:
-        return []
-    clean = geom if geom.is_valid else geom.buffer(0)
-    if clean.is_empty:
-        return []
-    if isinstance(clean, Polygon):
-        return [clean] if clean.area > 1e-6 else []
-    if isinstance(clean, MultiPolygon):
-        return [g for g in clean.geoms if g.area > 1e-6]
-    if hasattr(clean, "geoms"):
-        polys = [g for g in clean.geoms if isinstance(g, Polygon) and g.area > 1e-6]
-        return polys
-    return []
-
-
-def _clip_polygon_halfplane(
-    poly: Polygon, a: float, b: float, c_rhs: float
-) -> List[Polygon]:
-    ab_norm = math.hypot(a, b)
-    if ab_norm < 1e-9:
-        return []
-
-    line_normal = np.array([a, b], dtype=float) / ab_norm
-    line_dir = np.array([-line_normal[1], line_normal[0]], dtype=float)
-
-    if abs(a) > abs(b):
-        line_pt = np.array([c_rhs / a, 0.0], dtype=float)
-    else:
-        line_pt = np.array([0.0, c_rhs / b], dtype=float)
-
-    bounds = poly.bounds
-    extent = max(bounds[2] - bounds[0], bounds[3] - bounds[1], 100.0) * 4.0
-    p1 = line_pt - extent * line_dir
-    p2 = line_pt + extent * line_dir
-    p3 = p2 + extent * line_normal
-    p4 = p1 + extent * line_normal
-    half_plane = Polygon([tuple(p1), tuple(p2), tuple(p3), tuple(p4)])
-
+def _as_vec3(raw: Any, default: tuple[float, float, float]) -> np.ndarray:
+    if not isinstance(raw, list) or len(raw) != 3:
+        return np.asarray(default, dtype=float)
     try:
-        clipped = poly.intersection(half_plane)
-    except Exception:
-        return []
-    return _geometry_to_polygons(clipped)
+        return np.asarray([float(raw[0]), float(raw[1]), float(raw[2])], dtype=float)
+    except (TypeError, ValueError):
+        return np.asarray(default, dtype=float)
 
 
-def _clip_polygon_strip(
-    poly: Polygon, a: float, b: float, c0: float, lo: float, hi: float
-) -> List[Polygon]:
-    if hi <= lo:
-        return []
+def _ring_from_points(raw: Any) -> np.ndarray:
+    if not isinstance(raw, list) or len(raw) < 3:
+        return np.zeros((0, 2), dtype=float)
+    pts: list[list[float]] = []
+    for point in raw:
+        if not isinstance(point, list) or len(point) != 2:
+            continue
+        try:
+            pts.append([float(point[0]), float(point[1])])
+        except (TypeError, ValueError):
+            continue
+    if len(pts) < 3:
+        return np.zeros((0, 2), dtype=float)
+    arr = np.asarray(pts, dtype=float)
+    if np.allclose(arr[0], arr[-1]):
+        arr = arr[:-1]
+    return arr if arr.shape[0] >= 3 else np.zeros((0, 2), dtype=float)
 
-    # lo <= a*u + b*v + c0 <= hi
-    # 1) a*u + b*v >= lo - c0
-    # 2) -a*u - b*v >= c0 - hi
-    first = _clip_polygon_halfplane(poly, a, b, lo - c0)
-    if not first:
-        return []
-    out: List[Polygon] = []
-    for p in first:
-        out.extend(_clip_polygon_halfplane(p, -a, -b, c0 - hi))
-    return out
 
-
-def _triangulate_polygon(
-    poly: Polygon,
-) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
-    vertices: List[List[float]] = []
-    faces: List[List[int]] = []
+def _triangulate_polygon_2d(poly: Polygon) -> tuple[np.ndarray, np.ndarray]:
+    vertices: list[list[float]] = []
+    faces: list[list[int]] = []
     for tri in triangulate(poly):
         if tri.is_empty or tri.area <= 1e-9:
             continue
         if not poly.covers(tri.representative_point()):
             continue
         coords = np.asarray(list(tri.exterior.coords)[:3], dtype=float)
+        if coords.shape != (3, 2):
+            continue
         base = len(vertices)
         vertices.extend(coords.tolist())
         faces.append([base, base + 1, base + 2])
     if not vertices or not faces:
-        return np.zeros((0, 2), dtype=float), np.zeros((0, 3), dtype=int), []
-    loops = [np.asarray(poly.exterior.coords[:-1], dtype=float)]
-    loops.extend(np.asarray(ring.coords[:-1], dtype=float) for ring in poly.interiors)
-    return np.asarray(vertices, dtype=float), np.asarray(faces, dtype=int), loops
+        return np.zeros((0, 2), dtype=float), np.zeros((0, 3), dtype=int)
+    return np.asarray(vertices, dtype=float), np.asarray(faces, dtype=int)
 
 
-def _extrude_patch(
-    verts_2d: np.ndarray,
-    faces_2d: np.ndarray,
-    edge_loops_2d: List[np.ndarray],
-    depth_mm: float,
-) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
-    n_fill = len(verts_2d)
-    if n_fill == 0 or len(faces_2d) == 0:
-        return np.zeros((0, 3), dtype=float), np.zeros((0, 3), dtype=int), []
+def _build_local_panel_mesh(
+    part: Dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, list[np.ndarray], float] | None:
+    if Polygon is None or triangulate is None:
+        return None
 
-    outer_fill = np.column_stack([verts_2d, np.zeros(n_fill)])
-    inner_fill = np.column_stack([verts_2d, np.full(n_fill, -depth_mm)])
-    all_verts: List[np.ndarray] = [outer_fill, inner_fill]
-    all_faces: List[np.ndarray] = [faces_2d.copy(), faces_2d[:, ::-1] + n_fill]
+    thickness = float(part.get("thickness_mm", 0.0) or 0.0)
+    if thickness <= 1e-6:
+        return None
 
-    base_idx = 2 * n_fill
-    loops_out: List[np.ndarray] = []
-    for loop in edge_loops_2d:
-        n_loop = len(loop)
-        if n_loop < 2:
+    outline = _ring_from_points(part.get("outline_2d"))
+    if outline.shape[0] < 3:
+        return None
+
+    holes_raw = part.get("holes_2d", [])
+    holes: list[list[tuple[float, float]]] = []
+    if isinstance(holes_raw, list):
+        for hole in holes_raw:
+            ring = _ring_from_points(hole)
+            if ring.shape[0] >= 3:
+                holes.append([(float(p[0]), float(p[1])) for p in ring])
+
+    poly = Polygon(
+        [(float(p[0]), float(p[1])) for p in outline],
+        holes=holes if holes else None,
+    )
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    if poly.is_empty:
+        return None
+    if MultiPolygon is not None and isinstance(poly, MultiPolygon):
+        poly = max(poly.geoms, key=lambda g: float(g.area))
+
+    tri_verts_2d, tri_faces = _triangulate_polygon_2d(poly)
+    if tri_verts_2d.size == 0 or tri_faces.size == 0:
+        return None
+
+    n_base = tri_verts_2d.shape[0]
+    bottom = np.column_stack((tri_verts_2d, np.zeros(n_base, dtype=float)))
+    top = np.column_stack((tri_verts_2d, np.full(n_base, thickness, dtype=float)))
+    vertices = np.vstack((bottom, top))
+
+    faces: list[list[int]] = []
+    for f in tri_faces:
+        faces.append([int(f[0]), int(f[2]), int(f[1])])
+        faces.append([int(f[0] + n_base), int(f[1] + n_base), int(f[2] + n_base)])
+
+    rings_local: list[np.ndarray] = [np.asarray(poly.exterior.coords[:-1], dtype=float)]
+    rings_local.extend(np.asarray(r.coords[:-1], dtype=float) for r in poly.interiors)
+
+    for ring in rings_local:
+        m = ring.shape[0]
+        if m < 2:
             continue
-        outer_edge = np.column_stack([loop, np.zeros(n_loop)])
-        inner_edge = np.column_stack([loop, np.full(n_loop, -depth_mm)])
-        all_verts.extend([outer_edge, inner_edge])
-        loops_out.extend([outer_edge, inner_edge])
-
-        side_tris: List[List[int]] = []
-        for k in range(n_loop):
-            k_next = (k + 1) % n_loop
-            o0 = base_idx + k
-            o1 = base_idx + k_next
-            i0 = base_idx + n_loop + k
-            i1 = base_idx + n_loop + k_next
-            side_tris.append([o0, o1, i0])
-            side_tris.append([i0, o1, i1])
-        all_faces.append(np.asarray(side_tris, dtype=int))
-        base_idx += 2 * n_loop
-
-    return (
-        np.vstack(all_verts) if all_verts else np.zeros((0, 3), dtype=float),
-        np.vstack(all_faces) if all_faces else np.zeros((0, 3), dtype=int),
-        loops_out,
-    )
-
-
-def _transform_points(
-    local_points: np.ndarray, rot: np.ndarray, origin: np.ndarray
-) -> np.ndarray:
-    if len(local_points) == 0:
-        return np.zeros((0, 3), dtype=float)
-    return (rot @ local_points.T).T + origin
-
-
-def _to_scene_space(points: np.ndarray, scene: OverlaySceneData) -> np.ndarray:
-    if scene.space == "normalized":
-        return points
-    scale = scene.normalization.scale
-    if abs(scale) < 1e-12:
-        scale = 1.0
-    return points / scale + scene.normalization.anchor_raw
-
-
-def _build_directional_overlap_patches(
-    src_part_id: str,
-    src: Dict[str, Any],
-    dst: Dict[str, Any],
-    overlap_depth_mm: float,
-    scene: OverlaySceneData,
-) -> List[_OverlapPatch]:
-    src_poly = _outline_polygon(src.get("outline_2d"))
-    if src_poly is None:
-        return []
-
-    src_rot = _rotation_matrix_xyz(src.get("rotation_3d") or [0.0, 0.0, 0.0])
-    dst_rot = _rotation_matrix_xyz(dst.get("rotation_3d") or [0.0, 0.0, 0.0])
-    src_origin = np.asarray(
-        src.get("origin_3d") or src.get("position_3d") or [0.0, 0.0, 0.0], dtype=float
-    )
-    dst_origin = np.asarray(
-        dst.get("origin_3d") or dst.get("position_3d") or [0.0, 0.0, 0.0], dtype=float
-    )
-    src_thickness = float(src.get("thickness_mm", 0.0) or 0.0)
-    dst_thickness = float(dst.get("thickness_mm", 0.0) or 0.0)
-    if src_thickness <= 1e-6 or dst_thickness <= 1e-6:
-        return []
-
-    u_src = src_rot[:, 0]
-    v_src = src_rot[:, 1]
-    n_dst = dst_rot[:, 2]
-
-    a = float(np.dot(n_dst, u_src))
-    b = float(np.dot(n_dst, v_src))
-    if math.hypot(a, b) < 1e-9:
-        return []
-
-    d_surface = float(np.dot(n_dst, dst_origin))
-    c0 = float(np.dot(n_dst, src_origin) - d_surface)
-    tol = 0.5
-    strip_polys = _clip_polygon_strip(
-        src_poly, a, b, c0, lo=-dst_thickness + tol, hi=-tol
-    )
-    if not strip_polys:
-        return []
-
-    depth_mm = min(max(0.0, overlap_depth_mm), src_thickness)
-    if depth_mm <= 0.01:
-        return []
-
-    out: List[_OverlapPatch] = []
-    for poly in strip_polys:
-        verts_2d, faces_2d, loops_2d = _triangulate_polygon(poly)
-        if len(verts_2d) == 0 or len(faces_2d) == 0:
-            continue
-        local_verts, local_faces, local_loops = _extrude_patch(
-            verts_2d, faces_2d, loops_2d, depth_mm
-        )
-        world_verts = _transform_points(local_verts, src_rot, src_origin)
-        world_loops = [
-            _transform_points(loop, src_rot, src_origin) for loop in local_loops
-        ]
-        world_verts = _to_scene_space(world_verts, scene)
-        world_loops = [_to_scene_space(loop, scene) for loop in world_loops]
-        out.append(
-            _OverlapPatch(
-                part_id=src_part_id,
-                fill_vertices=world_verts,
-                fill_faces=local_faces,
-                edge_loops=world_loops,
+        for i in range(m):
+            p0 = ring[i]
+            p1 = ring[(i + 1) % m]
+            base = vertices.shape[0]
+            quad = np.asarray(
+                [
+                    [float(p0[0]), float(p0[1]), 0.0],
+                    [float(p1[0]), float(p1[1]), 0.0],
+                    [float(p1[0]), float(p1[1]), thickness],
+                    [float(p0[0]), float(p0[1]), thickness],
+                ],
+                dtype=float,
             )
-        )
-    return out
+            vertices = np.vstack((vertices, quad))
+            faces.append([base, base + 1, base + 2])
+            faces.append([base, base + 2, base + 3])
+
+    return vertices, np.asarray(faces, dtype=int), rings_local, thickness
 
 
-def _build_overlap_patches(
-    part_payloads: Dict[str, Dict[str, Any]],
-    overlap_details: Any,
-    scene: OverlaySceneData,
-) -> List[_OverlapPatch]:
-    if not isinstance(overlap_details, list):
-        return []
-
-    patches: List[_OverlapPatch] = []
-    for item in overlap_details:
-        if not isinstance(item, dict):
-            continue
-        part_a = str(item.get("part_a", "")).strip()
-        part_b = str(item.get("part_b", "")).strip()
-        overlap_mm = float(item.get("overlap_mm", 0.0) or 0.0)
-        if not part_a or not part_b or overlap_mm <= 0.01:
-            continue
-        pa = part_payloads.get(part_a)
-        pb = part_payloads.get(part_b)
-        if not pa or not pb:
-            continue
-        patches.extend(
-            _build_directional_overlap_patches(part_a, pa, pb, overlap_mm, scene)
-        )
-        patches.extend(
-            _build_directional_overlap_patches(part_b, pb, pa, overlap_mm, scene)
-        )
-    return patches
+def _local_to_world(
+    local_vertices: np.ndarray,
+    origin: np.ndarray,
+    basis_u: np.ndarray,
+    basis_v: np.ndarray,
+    basis_n: np.ndarray,
+) -> np.ndarray:
+    if local_vertices.size == 0:
+        return np.zeros((0, 3), dtype=float)
+    return (
+        origin[None, :]
+        + local_vertices[:, [0]] * basis_u[None, :]
+        + local_vertices[:, [1]] * basis_v[None, :]
+        + local_vertices[:, [2]] * basis_n[None, :]
+    )
 
 
-def _plotly_figure(
-    scene: OverlaySceneData,
-    selected: Set[str],
-    mesh_opacity: float,
-    part_opacity: float,
-    show_labels: bool,
-    overlap_patches: Optional[List[_OverlapPatch]] = None,
-) -> Any:
+def _part_color(index: int) -> str:
+    palette = [
+        "#0077B6",
+        "#2A9D8F",
+        "#E76F51",
+        "#E9C46A",
+        "#457B9D",
+        "#F4A261",
+        "#1D3557",
+        "#8AB17D",
+        "#6D597A",
+        "#3D405B",
+    ]
+    return palette[index % len(palette)]
+
+
+def _render_solids_plot(
+    capsule: Dict[str, Any], *, opacity: float = 0.8, show_edges: bool = True
+) -> None:
+    if go is None:
+        st.info("Install plotly to render 3D solids.")
+        return
+    if Polygon is None:
+        st.info("Install shapely to render 3D solids.")
+        return
+
+    parts = capsule.get("parts", [])
+    if not isinstance(parts, list) or not parts:
+        st.info("No parts available in spatial capsule.")
+        return
+
     fig = go.Figure()
-    overlap_patches = overlap_patches or []
-    v, f = scene.mesh_vertices, scene.mesh_faces
-    if len(v) and len(f):
+    label_x: list[float] = []
+    label_y: list[float] = []
+    label_z: list[float] = []
+    label_text: list[str] = []
+    rendered = 0
+
+    for idx, part in enumerate(parts):
+        if not isinstance(part, dict):
+            continue
+        mesh_payload = _build_local_panel_mesh(part)
+        if mesh_payload is None:
+            continue
+        local_vertices, faces, rings_local, thickness = mesh_payload
+        if faces.size == 0:
+            continue
+
+        origin = _as_vec3(part.get("origin_3d"), (0.0, 0.0, 0.0))
+        basis_u = _as_vec3(part.get("basis_u"), (1.0, 0.0, 0.0))
+        basis_v = _as_vec3(part.get("basis_v"), (0.0, 1.0, 0.0))
+        basis_n = _as_vec3(part.get("basis_n"), (0.0, 0.0, 1.0))
+
+        world_vertices = _local_to_world(
+            local_vertices, origin, basis_u, basis_v, basis_n
+        )
+        color = _part_color(idx)
+        part_id = str(part.get("part_id", f"part_{idx:03d}"))
+
         fig.add_trace(
             go.Mesh3d(
-                x=v[:, 0],
-                y=v[:, 1],
-                z=v[:, 2],
-                i=f[:, 0],
-                j=f[:, 1],
-                k=f[:, 2],
-                color="#A8A8A8",
-                opacity=mesh_opacity,
-                name="source_mesh",
-                hoverinfo="skip",
+                x=world_vertices[:, 0],
+                y=world_vertices[:, 1],
+                z=world_vertices[:, 2],
+                i=faces[:, 0],
+                j=faces[:, 1],
+                k=faces[:, 2],
+                color=color,
+                opacity=opacity,
+                name=part_id,
+                flatshading=True,
+                hovertemplate=f"{part_id}<extra></extra>",
                 showscale=False,
             )
         )
-    for part in scene.parts:
-        if part.part_id not in selected:
-            continue
-        pv, pf = part.fill_vertices, part.fill_faces
-        if len(pv) and len(pf):
-            fig.add_trace(
-                go.Mesh3d(
-                    x=pv[:, 0],
-                    y=pv[:, 1],
-                    z=pv[:, 2],
-                    i=pf[:, 0],
-                    j=pf[:, 1],
-                    k=pf[:, 2],
-                    color=part.color,
-                    opacity=part_opacity,
-                    name=part.part_id,
-                    legendgroup=part.part_id,
-                    flatshading=True,
-                    showscale=False,
+
+        if show_edges:
+            for ring in rings_local:
+                if ring.shape[0] < 2:
+                    continue
+                ring_closed = np.vstack((ring, ring[0]))
+                local_bottom = np.column_stack(
+                    (ring_closed, np.zeros(ring_closed.shape[0], dtype=float))
                 )
-            )
-        for loop in part.edge_loops:
-            if not len(loop):
-                continue
-            closed = loop if (loop[0] == loop[-1]).all() else np.vstack([loop, loop[0]])
-            fig.add_trace(
-                go.Scatter3d(
-                    x=closed[:, 0],
-                    y=closed[:, 1],
-                    z=closed[:, 2],
-                    mode="lines",
-                    line={"color": part.color, "width": 5},
-                    name=f"{part.part_id}_outline",
-                    legendgroup=part.part_id,
-                    showlegend=False,
-                    hoverinfo="skip",
+                local_top = np.column_stack(
+                    (ring_closed, np.full(ring_closed.shape[0], thickness, dtype=float))
                 )
-            )
-        if show_labels:
-            fig.add_trace(
-                go.Scatter3d(
-                    x=[part.centroid[0]],
-                    y=[part.centroid[1]],
-                    z=[part.centroid[2]],
-                    mode="text",
-                    text=[part.part_id],
-                    textposition="middle center",
-                    name=f"{part.part_id}_label",
-                    legendgroup=part.part_id,
-                    showlegend=False,
-                    hoverinfo="skip",
+                world_bottom = _local_to_world(
+                    local_bottom, origin, basis_u, basis_v, basis_n
                 )
-            )
-    for idx, patch in enumerate(overlap_patches):
-        if patch.part_id not in selected:
-            continue
-        if len(patch.fill_vertices) and len(patch.fill_faces):
-            ov = patch.fill_vertices
-            of = patch.fill_faces
-            fig.add_trace(
-                go.Mesh3d(
-                    x=ov[:, 0],
-                    y=ov[:, 1],
-                    z=ov[:, 2],
-                    i=of[:, 0],
-                    j=of[:, 1],
-                    k=of[:, 2],
-                    color="#FF0000",
-                    opacity=0.80,
-                    name=f"overlap_{idx}",
-                    showlegend=False,
-                    hoverinfo="skip",
-                    flatshading=True,
+                world_top = _local_to_world(
+                    local_top, origin, basis_u, basis_v, basis_n
                 )
-            )
-        for loop in patch.edge_loops:
-            if not len(loop):
-                continue
-            closed = loop if (loop[0] == loop[-1]).all() else np.vstack([loop, loop[0]])
-            fig.add_trace(
-                go.Scatter3d(
-                    x=closed[:, 0],
-                    y=closed[:, 1],
-                    z=closed[:, 2],
-                    mode="lines",
-                    line={"color": "#FF0000", "width": 8},
-                    name=f"overlap_edge_{idx}",
-                    showlegend=False,
-                    hoverinfo="skip",
-                )
-            )
-    fig.update_layout(
-        scene={"aspectmode": "data", "uirevision": "keep"},
-        margin={"l": 10, "r": 10, "t": 30, "b": 10},
-        legend={"orientation": "h"},
-        uirevision="keep",
-    )
-    return fig
-
-
-def _matplotlib_figure(
-    scene: OverlaySceneData,
-    selected: Set[str],
-    mesh_opacity: float,
-    part_opacity: float,
-    show_labels: bool,
-    overlap_patches: Optional[List[_OverlapPatch]] = None,
-) -> Any:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-    overlap_patches = overlap_patches or []
-    fig = plt.figure(figsize=(9.5, 7.0))
-    ax = fig.add_subplot(111, projection="3d")
-    bounds: List[np.ndarray] = []
-    v, f = scene.mesh_vertices, scene.mesh_faces
-    if len(v) and len(f):
-        ax.add_collection3d(
-            Poly3DCollection(
-                v[f],
-                facecolors=(0.65, 0.65, 0.65, mesh_opacity),
-                edgecolors=(0.65, 0.65, 0.65, mesh_opacity * 0.2),
-                linewidths=0.05,
-            )
-        )
-        bounds.append(v)
-    for part in scene.parts:
-        if part.part_id not in selected:
-            continue
-        if len(part.fill_vertices) and len(part.fill_faces):
-            ax.add_collection3d(
-                Poly3DCollection(
-                    part.fill_vertices[part.fill_faces],
-                    facecolors=_hex_to_rgba(part.color, part_opacity),
-                    edgecolors=_hex_to_rgba(part.color, min(1.0, part_opacity + 0.15)),
-                    linewidths=0.1,
-                )
-            )
-            bounds.append(part.fill_vertices)
-        for loop in part.edge_loops:
-            if not len(loop):
-                continue
-            closed = loop if (loop[0] == loop[-1]).all() else np.vstack([loop, loop[0]])
-            ax.plot(
-                closed[:, 0],
-                closed[:, 1],
-                closed[:, 2],
-                color=part.color,
-                linewidth=1.3,
-            )
-        if show_labels:
-            ax.text(
-                part.centroid[0],
-                part.centroid[1],
-                part.centroid[2],
-                part.part_id,
-                color=part.color,
-                fontsize=8,
-            )
-    for patch in overlap_patches:
-        if patch.part_id not in selected:
-            continue
-        if len(patch.fill_vertices) and len(patch.fill_faces):
-            ax.add_collection3d(
-                Poly3DCollection(
-                    patch.fill_vertices[patch.fill_faces],
-                    facecolors=(1.0, 0.0, 0.0, 0.8),
-                    edgecolors=(1.0, 0.0, 0.0, 0.95),
-                    linewidths=0.2,
-                )
-            )
-            bounds.append(patch.fill_vertices)
-        for loop in patch.edge_loops:
-            if not len(loop):
-                continue
-            closed = loop if (loop[0] == loop[-1]).all() else np.vstack([loop, loop[0]])
-            ax.plot(
-                closed[:, 0],
-                closed[:, 1],
-                closed[:, 2],
-                color="#FF0000",
-                linewidth=2.5,
-            )
-    if bounds:
-        cloud = np.vstack(bounds)
-        mins, maxs = cloud.min(axis=0), cloud.max(axis=0)
-        center = (mins + maxs) * 0.5
-        radius = max(float(np.max(maxs - mins)) * 0.55, 1.0)
-        ax.set_xlim(center[0] - radius, center[0] + radius)
-        ax.set_ylim(center[1] - radius, center[1] + radius)
-        ax.set_zlim(center[2] - radius, center[2] + radius)
-    ax.set_xlabel("X (mm)")
-    ax.set_ylabel("Y (mm)")
-    ax.set_zlabel("Z (mm)")
-    ax.view_init(elev=22, azim=38)
-    fig.tight_layout()
-    return fig
-
-
-def _render_overlay(run_dir: str, metrics: Dict[str, Any], key: str) -> None:
-    """Show 3D overlay with display controls."""
-    with st.expander("Display settings", expanded=False):
-        c1, c2, c3, c4, c5 = st.columns(5)
-        space_label = c1.selectbox(
-            "Space", ["Original", "Normalized"], index=0, key=f"{key}-sp"
-        )
-        max_faces = c2.slider(
-            "Face cap", 2000, 40000, DEFAULT_MAX_MESH_FACES, 1000, key=f"{key}-fc"
-        )
-        mesh_op = c3.slider("Mesh opacity", 0.05, 1.0, 0.30, 0.05, key=f"{key}-mo")
-        part_op = c4.slider("Part opacity", 0.05, 1.0, 0.55, 0.05, key=f"{key}-po")
-        labels = c5.checkbox("Labels", True, key=f"{key}-lb")
-
-    space = "original" if space_label == "Original" else "normalized"
-    try:
-        scene = _cached_scene(run_dir, space, max_faces)
-    except Exception as exc:
-        st.warning(f"Overlay unavailable: {exc}")
-        return
-    if not scene.parts:
-        st.warning("No part geometry for overlay.")
-        return
-
-    part_ids = [p.part_id for p in scene.parts]
-    visible = st.multiselect(
-        "Visible parts", part_ids, default=part_ids, key=f"{key}-vp"
-    )
-    debug = metrics.get("debug", {}) if isinstance(metrics, dict) else {}
-    overlap_details = (
-        debug.get("plane_overlap_details", []) if isinstance(debug, dict) else []
-    )
-    design_payload_path = Path(run_dir) / "artifacts" / "design_first_principles.json"
-    part_payloads = (
-        _part_payload_map(str(design_payload_path))
-        if design_payload_path.exists()
-        else {}
-    )
-    overlap_patches = _build_overlap_patches(part_payloads, overlap_details, scene)
-    visible_set = set(visible)
-    visible_overlap_regions = sum(
-        1 for patch in overlap_patches if patch.part_id in visible_set
-    )
-
-    if go is not None:
-        fig = _plotly_figure(
-            scene,
-            visible_set,
-            mesh_op,
-            part_op,
-            labels,
-            overlap_patches=overlap_patches,
-        )
-        st.plotly_chart(fig, use_container_width=True, key=f"{key}-fig")
-    else:
-        fig = _matplotlib_figure(
-            scene,
-            visible_set,
-            mesh_op,
-            part_op,
-            labels,
-            overlap_patches=overlap_patches,
-        )
-        st.info("Plotly unavailable; showing static matplotlib 3D overlay.")
-        st.pyplot(fig, clear_figure=True, use_container_width=True)
-    st.caption(
-        f"Run: {scene.run_id} | Space: {scene.space} | "
-        f"Mesh faces: {len(scene.mesh_faces)} | Parts: {len(scene.parts)}"
-    )
-    if overlap_patches:
-        st.caption(
-            f"Overlap highlight: {visible_overlap_regions} visible overlap region(s) in red."
-        )
-    if scene.warnings:
-        with st.expander("Overlay warnings"):
-            for w in scene.warnings:
-                st.write(f"- {w}")
-
-
-# ---------------------------------------------------------------------------
-# Phase step-through debugger
-# ---------------------------------------------------------------------------
-
-
-@st.cache_data(show_spinner=False)
-def _cached_snapshot_scene(
-    run_dir: str, snapshot_path: str, space: str, max_faces: int
-) -> OverlaySceneData:
-    return build_overlay_scene(
-        run_dir,
-        space=space,
-        max_mesh_faces=max_faces,
-        design_json_override=snapshot_path,
-    )
-
-
-_SPATIAL_CAPSULE_PHASE_RE = re.compile(r"^spatial_capsule_phase_(\d+)(?:_(.+))?$")
-
-
-def _spatial_capsule_phase_meta(path: Path) -> Tuple[int, str]:
-    match = _SPATIAL_CAPSULE_PHASE_RE.match(path.stem)
-    if match is None:
-        return (10**9, path.stem)
-    phase_idx = int(match.group(1))
-    raw_label = str(match.group(2) or f"phase-{phase_idx:02d}")
-    pretty = raw_label.replace("-", " ").strip() or f"phase {phase_idx:02d}"
-    return (phase_idx, pretty)
-
-
-def _spatial_capsule_part_map(payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    raw_parts = payload.get("parts", [])
-    if not isinstance(raw_parts, list):
-        return {}
-    out: Dict[str, Dict[str, Any]] = {}
-    for item in raw_parts:
-        if not isinstance(item, dict):
-            continue
-        part_id = str(item.get("part_id", "")).strip()
-        if part_id:
-            out[part_id] = item
-    return out
-
-
-def _spatial_capsule_relation_map(payload: Dict[str, Any]) -> Dict[Tuple[str, str], str]:
-    raw_relations = payload.get("relations", [])
-    if not isinstance(raw_relations, list):
-        return {}
-    out: Dict[Tuple[str, str], str] = {}
-    for rel in raw_relations:
-        if not isinstance(rel, dict):
-            continue
-        part_a = str(rel.get("part_a", "")).strip()
-        part_b = str(rel.get("part_b", "")).strip()
-        if not part_a or not part_b or part_a == part_b:
-            continue
-        key = tuple(sorted((part_a, part_b)))
-        out[key] = str(rel.get("class", "")).strip().lower()
-    return out
-
-
-def _spatial_capsule_class_counts(
-    relation_map: Dict[Tuple[str, str], str],
-) -> Dict[str, int]:
-    counts: Counter[str] = Counter()
-    for cls in relation_map.values():
-        if cls:
-            counts[cls] += 1
-    return dict(sorted(counts.items()))
-
-
-def _spatial_capsule_part_center(part_payload: Dict[str, Any]) -> Optional[np.ndarray]:
-    obb = part_payload.get("obb", {})
-    if isinstance(obb, dict):
-        center = obb.get("center")
-        if isinstance(center, list) and len(center) == 3:
-            try:
-                return np.asarray(center, dtype=float)
-            except Exception:
-                pass
-    origin = part_payload.get("origin_3d")
-    if isinstance(origin, list) and len(origin) == 3:
-        try:
-            return np.asarray(origin, dtype=float)
-        except Exception:
-            return None
-    return None
-
-
-def _build_spatial_capsule_transition(
-    before: Dict[str, Any], after: Dict[str, Any]
-) -> Dict[str, Any]:
-    before_parts = _spatial_capsule_part_map(before)
-    after_parts = _spatial_capsule_part_map(after)
-    before_rel = _spatial_capsule_relation_map(before)
-    after_rel = _spatial_capsule_relation_map(after)
-
-    before_ids = set(before_parts.keys())
-    after_ids = set(after_parts.keys())
-    parts_added = sorted(after_ids - before_ids)
-    parts_removed = sorted(before_ids - after_ids)
-    common_ids = sorted(before_ids & after_ids)
-
-    before_rel_keys = set(before_rel.keys())
-    after_rel_keys = set(after_rel.keys())
-    rel_added = sorted(after_rel_keys - before_rel_keys)
-    rel_removed = sorted(before_rel_keys - after_rel_keys)
-
-    rel_changed: List[Dict[str, Any]] = []
-    for pair in sorted(before_rel_keys & after_rel_keys):
-        cls_before = before_rel[pair]
-        cls_after = after_rel[pair]
-        if cls_before != cls_after:
-            rel_changed.append(
-                {
-                    "pair": [pair[0], pair[1]],
-                    "before": cls_before,
-                    "after": cls_after,
-                }
-            )
-
-    before_counts = _spatial_capsule_class_counts(before_rel)
-    after_counts = _spatial_capsule_class_counts(after_rel)
-    classes = sorted(set(before_counts.keys()) | set(after_counts.keys()))
-    class_delta = {
-        cls: int(after_counts.get(cls, 0)) - int(before_counts.get(cls, 0))
-        for cls in classes
-    }
-
-    max_part_motion = 0.0
-    for part_id in common_ids:
-        c_before = _spatial_capsule_part_center(before_parts[part_id])
-        c_after = _spatial_capsule_part_center(after_parts[part_id])
-        if c_before is None or c_after is None:
-            continue
-        max_part_motion = max(max_part_motion, float(np.linalg.norm(c_after - c_before)))
-
-    return {
-        "parts_before": len(before_parts),
-        "parts_after": len(after_parts),
-        "relations_before": len(before_rel),
-        "relations_after": len(after_rel),
-        "parts_added": parts_added,
-        "parts_removed": parts_removed,
-        "relation_pairs_added": [[a, b] for a, b in rel_added],
-        "relation_pairs_removed": [[a, b] for a, b in rel_removed],
-        "relation_class_changes": rel_changed,
-        "class_counts_before": before_counts,
-        "class_counts_after": after_counts,
-        "class_count_delta": class_delta,
-        "overlap_pairs_before": int(before_counts.get("overlapping", 0)),
-        "overlap_pairs_after": int(after_counts.get("overlapping", 0)),
-        "max_part_motion_mm": float(max_part_motion),
-    }
-
-
-@st.cache_data(show_spinner=False)
-def _cached_spatial_capsule_transitions(run_dir: str) -> List[Dict[str, Any]]:
-    snapshots_dir = Path(run_dir) / "artifacts" / "snapshots"
-    if not snapshots_dir.is_dir():
-        return []
-
-    capsule_files = sorted(
-        snapshots_dir.glob("spatial_capsule_phase_*.json"),
-        key=lambda p: (_spatial_capsule_phase_meta(p)[0], p.name),
-    )
-    if len(capsule_files) < 2:
-        return []
-
-    parsed: List[Tuple[Path, Dict[str, Any], int, str]] = []
-    for path in capsule_files:
-        payload = read_json(path)
-        if not isinstance(payload, dict):
-            continue
-        phase_idx, phase_label = _spatial_capsule_phase_meta(path)
-        parsed.append((path, payload, phase_idx, phase_label))
-
-    if len(parsed) < 2:
-        return []
-
-    transitions: List[Dict[str, Any]] = []
-    for idx in range(1, len(parsed)):
-        prev_path, prev_payload, prev_phase_idx, prev_label = parsed[idx - 1]
-        curr_path, curr_payload, curr_phase_idx, curr_label = parsed[idx]
-        delta = _build_spatial_capsule_transition(prev_payload, curr_payload)
-        delta.update(
-            {
-                "from_file": prev_path.name,
-                "to_file": curr_path.name,
-                "from_phase_index": int(prev_phase_idx),
-                "to_phase_index": int(curr_phase_idx),
-                "from_phase_label": prev_label,
-                "to_phase_label": curr_label,
-            }
-        )
-        transitions.append(delta)
-    return transitions
-
-
-def _render_spatial_capsule_diff(run_dir: str, key: str) -> None:
-    transitions = _cached_spatial_capsule_transitions(run_dir)
-    if not transitions:
-        return
-
-    with st.expander("Spatial Capsule Diffs", expanded=False):
-        rows = []
-        for t in transitions:
-            rows.append(
-                {
-                    "transition": (
-                        f"{t['from_phase_index']:02d} {t['from_phase_label']} -> "
-                        f"{t['to_phase_index']:02d} {t['to_phase_label']}"
-                    ),
-                    "part_delta": int(t["parts_after"]) - int(t["parts_before"]),
-                    "relation_delta": int(t["relations_after"])
-                    - int(t["relations_before"]),
-                    "overlap_delta": int(t["overlap_pairs_after"])
-                    - int(t["overlap_pairs_before"]),
-                    "class_changes": len(t["relation_class_changes"]),
-                    "max_motion_mm": round(float(t["max_part_motion_mm"]), 3),
-                }
-            )
-        st.dataframe(rows, use_container_width=True, hide_index=True)
-
-        sel = st.selectbox(
-            "Transition detail",
-            range(len(transitions)),
-            format_func=lambda i: (
-                f"{transitions[i]['from_phase_index']:02d} {transitions[i]['from_phase_label']} -> "
-                f"{transitions[i]['to_phase_index']:02d} {transitions[i]['to_phase_label']}"
-            ),
-            key=f"{key}-scd-sel",
-        )
-        chosen = transitions[sel]
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric(
-            "Parts",
-            int(chosen["parts_after"]),
-            delta=int(chosen["parts_after"]) - int(chosen["parts_before"]),
-        )
-        c2.metric(
-            "Relations",
-            int(chosen["relations_after"]),
-            delta=int(chosen["relations_after"]) - int(chosen["relations_before"]),
-        )
-        c3.metric(
-            "Overlaps",
-            int(chosen["overlap_pairs_after"]),
-            delta=int(chosen["overlap_pairs_after"])
-            - int(chosen["overlap_pairs_before"]),
-        )
-        c4.metric("Class changes", len(chosen["relation_class_changes"]))
-        c5.metric("Max motion", f"{float(chosen['max_part_motion_mm']):.2f} mm")
-
-        if chosen["parts_added"]:
-            st.write("Added parts:", ", ".join(chosen["parts_added"]))
-        if chosen["parts_removed"]:
-            st.write("Removed parts:", ", ".join(chosen["parts_removed"]))
-
-        show_json = st.checkbox(
-            "Show raw transition JSON",
-            value=False,
-            key=f"{key}-scd-json",
-        )
-        if show_json:
-            st.json(chosen)
-            st.download_button(
-                "Download transition JSON",
-                data=json.dumps(chosen, indent=2) + "\n",
-                file_name=(
-                    f"spatial_capsule_diff_{chosen['from_phase_index']:02d}_"
-                    f"to_{chosen['to_phase_index']:02d}.json"
-                ),
-                mime="application/json",
-                key=f"{key}-scd-dl",
-            )
-
-
-def _render_phase_stepper(run_dir: str, key: str) -> None:
-    """Show a slider to step through pipeline phase snapshots."""
-    snapshots_dir = Path(run_dir) / "artifacts" / "snapshots"
-    if not snapshots_dir.is_dir():
-        return
-
-    snapshot_files = sorted(snapshots_dir.glob("phase_*.json"))
-    if not snapshot_files:
-        return
-
-    # Load metadata for slider labels
-    snapshot_meta = []
-    for sf in snapshot_files:
-        try:
-            meta = read_json(sf)
-            label = meta.get("phase_label", sf.stem)
-            count = meta.get("part_count", "?")
-            diagnostics = meta.get("diagnostics", {})
-            overlap = (
-                diagnostics.get("plane_overlap", {})
-                if isinstance(diagnostics, dict)
-                else {}
-            )
-            overlap_pairs = (
-                int(overlap.get("plane_overlap_pairs", 0) or 0)
-                if isinstance(overlap, dict)
-                else 0
-            )
-            overlap_details = (
-                overlap.get("plane_overlap_details", [])
-                if isinstance(overlap, dict)
-                else []
-            )
-            snapshot_meta.append(
-                (str(sf), label, count, overlap_pairs, overlap_details)
-            )
-        except Exception:
-            snapshot_meta.append((str(sf), sf.stem, "?", 0, []))
-
-    if len(snapshot_meta) < 2:
-        return
-
-    with st.expander("Phase Step-Through", expanded=False):
-        labels = [
-            f"{i}: {label} ({count} parts)"
-            for i, (_, label, count, _, _) in enumerate(snapshot_meta)
-        ]
-        selected_label = st.select_slider(
-            "Pipeline phase",
-            options=labels,
-            value=labels[-1],
-            key=f"{key}-phase-sl",
-        )
-        selected_idx = labels.index(selected_label)
-        snapshot_path, _, _, overlap_pairs, overlap_details = snapshot_meta[
-            selected_idx
-        ]
-
-        with st.container():
-            c1, c2, c3 = st.columns(3)
-            space_label = c1.selectbox(
-                "Space", ["Original", "Normalized"], index=0, key=f"{key}-ps-sp"
-            )
-            max_faces = c2.slider(
-                "Face cap",
-                2000,
-                40000,
-                DEFAULT_MAX_MESH_FACES,
-                1000,
-                key=f"{key}-ps-fc",
-            )
-            part_op = c3.slider(
-                "Part opacity", 0.05, 1.0, 0.55, 0.05, key=f"{key}-ps-po"
-            )
-
-        space = "original" if space_label == "Original" else "normalized"
-        try:
-            scene = _cached_snapshot_scene(run_dir, snapshot_path, space, max_faces)
-        except Exception as exc:
-            st.warning(f"Phase overlay unavailable: {exc}")
-            return
-
-        if not scene.parts:
-            st.info("No parts in this phase.")
-            return
-
-        all_ids = {p.part_id for p in scene.parts}
-        part_payloads = _part_payload_map(snapshot_path)
-        overlap_patches = _build_overlap_patches(part_payloads, overlap_details, scene)
-        if go is not None:
-            fig = _plotly_figure(
-                scene,
-                all_ids,
-                0.30,
-                part_op,
-                True,
-                overlap_patches=overlap_patches,
-            )
-            st.plotly_chart(fig, use_container_width=True, key=f"{key}-ps-fig")
-        else:
-            fig = _matplotlib_figure(
-                scene,
-                all_ids,
-                0.30,
-                part_op,
-                True,
-                overlap_patches=overlap_patches,
-            )
-            st.pyplot(fig, clear_figure=True, use_container_width=True)
-
-        st.caption(
-            f"Phase: {snapshot_meta[selected_idx][1]} | Parts: {len(scene.parts)} | "
-            f"Overlap pairs: {overlap_pairs} | Overlap regions: {len(overlap_patches)}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Artifact / SVG gallery
-# ---------------------------------------------------------------------------
-
-
-def _render_artifacts(run_dir: str, key: str) -> None:
-    files = artifact_files(run_dir)
-    if not files:
-        st.caption("No artifacts.")
-        return
-    previewable = [
-        p
-        for p in files
-        if p.suffix.lower() in PREVIEW_IMAGE_EXTENSIONS or p.suffix.lower() == ".svg"
-    ]
-    if previewable:
-        for path in previewable[:12]:
-            rel = path.relative_to(Path(run_dir))
-            if path.suffix.lower() == ".svg":
-                with st.expander(f"SVG: {rel}", expanded=False):
-                    try:
-                        st.components.v1.html(
-                            path.read_text(encoding="utf-8"), height=460, scrolling=True
-                        )
-                    except OSError as exc:
-                        st.warning(f"Could not load {rel}: {exc}")
-            else:
-                st.image(str(path), caption=str(rel), use_container_width=True)
-    for path in files:
-        rel = path.relative_to(Path(run_dir))
-        with path.open("rb") as f:
-            st.download_button(
-                f"Download {rel}",
-                data=f.read(),
-                file_name=path.name,
-                key=f"{key}-dl-{rel}",
-            )
-
-
-# ---------------------------------------------------------------------------
-# Violations table
-# ---------------------------------------------------------------------------
-
-
-def _render_violations(metrics: Dict[str, Any]) -> None:
-    violations = metrics.get("violations", [])
-    if not violations:
-        return
-    st.subheader("Violations")
-    st.dataframe(violations, use_container_width=True, hide_index=True)
-
-
-# ---------------------------------------------------------------------------
-# Metrics row
-# ---------------------------------------------------------------------------
-
-
-def _render_metrics_row(metrics: Dict[str, Any]) -> None:
-    quality = metrics.get("quality_metrics", {})
-    counts = metrics.get("counts", {})
-    debug = metrics.get("debug", {})
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-    c1.metric("Status", (metrics.get("status") or "n/a").upper())
-    c2.metric("Score", f"{quality.get('overall_score', 0):.3f}")
-    c3.metric("Parts", str(quality.get("part_count", counts.get("components", 0))))
-    c4.metric(
-        "Errors",
-        str(
-            sum(
-                1 for v in metrics.get("violations", []) if v.get("severity") == "error"
-            )
-        ),
-    )
-    c5.metric("Hausdorff", f"{quality.get('hausdorff_mm', 0):.1f} mm")
-    c6.metric("Normal err", f"{quality.get('normal_error_deg', 0):.1f} deg")
-    coverage = debug.get("coverage_ratio_unique_faces")
-    c7.metric("Coverage", f"{coverage:.2f}" if coverage is not None else "n/a")
-
-
-# ---------------------------------------------------------------------------
-# Tab 1: Suite Review
-# ---------------------------------------------------------------------------
-
-
-def _thumbnail_grid(rows: List[Dict[str, Any]], cols: int = 3) -> None:
-    """Show overlay screenshots in a grid if available."""
-    thumbs = []
-    for row in rows:
-        run_dir = str(row.get("run_dir", "")).strip()
-        if not run_dir:
-            continue
-        screenshot = Path(run_dir) / "artifacts" / "overlay_screenshot.png"
-        if screenshot.exists():
-            thumbs.append((row.get("case_id", ""), str(screenshot)))
-    if not thumbs:
-        return
-    st.subheader("Overlay Thumbnails")
-    col_objs = st.columns(cols)
-    for i, (case_id, img_path) in enumerate(thumbs):
-        col_objs[i % cols].image(img_path, caption=case_id, use_container_width=True)
-
-
-def _suite_compare(suites: List[Dict[str, Any]], suites_dir: str) -> None:
-    if len(suites) < 2:
-        return
-    st.subheader("Suite Comparison")
-    suite_ids = [str(s["suite_run_id"]) for s in suites]
-    c1, c2 = st.columns(2)
-    cand_id = c1.selectbox("Candidate", suite_ids, index=0, key="cmp-cand")
-    base_id = c2.selectbox(
-        "Baseline", suite_ids, index=min(1, len(suite_ids) - 1), key="cmp-base"
-    )
-    if cand_id == base_id:
-        st.caption("Select different suites to compare.")
-        return
-
-    regressions_only = st.checkbox("Show regressions only", value=False, key="cmp-reg")
-    cand_rows = read_json(Path(suites_dir) / cand_id / "results.json").get("rows", [])
-    base_rows = read_json(Path(suites_dir) / base_id / "results.json").get("rows", [])
-    cand_map = suite_rows_by_case(cand_rows if isinstance(cand_rows, list) else [])
-    base_map = suite_rows_by_case(base_rows if isinstance(base_rows, list) else [])
-
-    deltas: List[Dict[str, Any]] = []
-    for case_id, cand in cand_map.items():
-        base = base_map.get(case_id)
-        if not base:
-            continue
-        cs = safe_float(cand.get("overall_score"))
-        bs = safe_float(base.get("overall_score"))
-        ce = int(cand.get("errors", 0) or 0)
-        be = int(base.get("errors", 0) or 0)
-        score_delta = round(cs - bs, 4) if cs is not None and bs is not None else None
-        if regressions_only and score_delta is not None and score_delta >= 0:
-            continue
-        deltas.append(
-            {
-                "case_id": case_id,
-                "cand_status": cand.get("status"),
-                "base_status": base.get("status"),
-                "score_delta": score_delta,
-                "error_delta": ce - be,
-            }
-        )
-    if not deltas:
-        st.caption("No overlapping cases (or no regressions).")
-        return
-    st.dataframe(
-        sorted(
-            deltas,
-            key=lambda r: (
-                1e9 if r["score_delta"] is None else r["score_delta"],
-                -r["error_delta"],
-            ),
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-def _render_launch_panel(suites_dir: str) -> None:
-    """Collapsible panel for launching a suite run and showing progress."""
-    with st.expander("Launch Suite", expanded="suite_process" in st.session_state):
-        suite_file = st.text_input(
-            "Suite file", value="benchmarks/mesh_suite.json", key="launch-suite-file"
-        )
-        c1, c2 = st.columns(2)
-        strict_no_overlap = c1.checkbox(
-            "Strict no-overlap",
-            value=False,
-            key="launch-strict-no-overlap",
-            help="Pass --step3-enforce-zero-overlap to suite runs.",
-        )
-        trim_workers = int(
-            c2.number_input(
-                "Trim workers",
-                min_value=0,
-                max_value=64,
-                value=0,
-                step=1,
-                key="launch-trim-workers",
-                help="Pass --step3-trim-parallel-workers (0 keeps script default).",
-            )
-        )
-        if st.button(
-            "Launch", key="launch-btn", disabled="suite_process" in st.session_state
-        ):
-            suite_path = Path(suite_file)
-            if not suite_path.is_absolute():
-                suite_path = ROOT / suite_path
-            if not suite_path.is_file():
-                st.error(f"Suite file not found: {suite_path}")
-            else:
-                cmd = [
-                    str(ROOT / "venv" / "bin" / "python3"),
-                    str(ROOT / "scripts" / "run_mesh_suite.py"),
-                    "--suite-file",
-                    str(suite_path),
-                    "--suites-dir",
-                    suites_dir,
-                ]
-                if strict_no_overlap:
-                    cmd.append("--step3-enforce-zero-overlap")
-                if trim_workers > 0:
-                    cmd.extend(["--step3-trim-parallel-workers", str(trim_workers)])
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(ROOT),
-                )
-                st.session_state["suite_process"] = proc
-                # Wait briefly for the suite dir to appear (manifest written before loop)
-                import time
-
-                time.sleep(0.5)
-                # Find the newest suite dir (the one we just launched)
-                sd = Path(suites_dir)
-                if sd.exists():
-                    dirs = sorted(
-                        [d for d in sd.iterdir() if d.is_dir() and d.name != "latest"],
-                        key=lambda d: d.stat().st_mtime,
-                        reverse=True,
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=world_bottom[:, 0],
+                        y=world_bottom[:, 1],
+                        z=world_bottom[:, 2],
+                        mode="lines",
+                        line={"color": "#111111", "width": 2},
+                        hoverinfo="skip",
+                        showlegend=False,
                     )
-                    if dirs:
-                        st.session_state["suite_dir"] = str(dirs[0])
-                st.rerun()
+                )
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=world_top[:, 0],
+                        y=world_top[:, 1],
+                        z=world_top[:, 2],
+                        mode="lines",
+                        line={"color": "#111111", "width": 2},
+                        hoverinfo="skip",
+                        showlegend=False,
+                    )
+                )
 
-        if "suite_process" in st.session_state:
-            _render_suite_progress()
-
-
-@st.fragment(run_every="3s")
-def _render_suite_progress() -> None:
-    """Polling fragment that shows progress while a suite is running."""
-    proc: subprocess.Popen = st.session_state.get("suite_process")
-    suite_dir: str = st.session_state.get("suite_dir", "")
-    if proc is None:
-        return
-
-    finished = proc.poll() is not None
-
-    if suite_dir:
-        progress = read_suite_progress(suite_dir)
-        total = progress["total"]
-        completed = progress["completed"]
-        rows = progress["rows"]
-    else:
-        total, completed, rows = 0, 0, []
-
-    if total > 0:
-        st.progress(completed / total)
-        if finished:
-            if proc.returncode == 0:
-                st.success(f"Suite complete: {completed}/{total} cases.")
-            else:
-                st.error(f"Suite finished with errors (exit code {proc.returncode}).")
+        obb = part.get("obb", {})
+        center_raw = obb.get("center") if isinstance(obb, dict) else None
+        if isinstance(center_raw, list) and len(center_raw) == 3:
+            center = _as_vec3(center_raw, (0.0, 0.0, 0.0))
         else:
-            st.caption(f"Running case {completed + 1} of {total}...")
-    elif finished:
-        st.warning("Suite process exited before writing results.")
+            center = np.mean(world_vertices, axis=0)
+        label_x.append(float(center[0]))
+        label_y.append(float(center[1]))
+        label_z.append(float(center[2]))
+        label_text.append(part_id)
+        rendered += 1
 
-    if rows:
-        mini = [
-            {
-                "case_id": r.get("case_id"),
-                "status": status_badge(str(r.get("status", ""))),
-                "score": r.get("overall_score"),
-            }
-            for r in rows
-        ]
-        st.dataframe(mini, use_container_width=True, hide_index=True)
-
-    if finished:
-        del st.session_state["suite_process"]
-        st.session_state.pop("suite_dir", None)
-        st.rerun()
-
-
-def _render_suite_review(suites_dir: str) -> None:
-    _render_launch_panel(suites_dir)
-
-    suites = list_suite_runs(suites_dir)
-    if not suites:
-        st.info("No suite runs found.")
+    if rendered == 0:
+        st.info("No valid panel solids to render.")
         return
 
-    suite_labels = [
-        (
-            f"{s['suite_run_id']}  ({s['case_count']} cases, mean={s['mean_score']:.3f})"
-            if s["mean_score"] is not None
-            else f"{s['suite_run_id']}  ({s['case_count']} cases)"
+    fig.add_trace(
+        go.Scatter3d(
+            x=label_x,
+            y=label_y,
+            z=label_z,
+            mode="text",
+            text=label_text,
+            textposition="top center",
+            showlegend=False,
+            hoverinfo="skip",
         )
-        for s in suites
-    ]
-    idx = st.selectbox(
-        "Suite run",
-        range(len(suites)),
-        format_func=lambda i: suite_labels[i],
-        key="suite-sel",
     )
-    selected = suites[idx]
-    suite_dir = Path(str(selected["suite_dir"]))
-
-    # Summary
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Cases", selected["case_count"])
-    c2.metric("Success", selected["successes"])
-    c3.metric("Partial", selected["partials"])
-    c4.metric("Fail", selected["fails"])
-    c5.metric(
-        "Mean Score",
-        (
-            f"{selected['mean_score']:.3f}"
-            if selected["mean_score"] is not None
-            else "n/a"
-        ),
+    fig.update_layout(
+        margin={"l": 0, "r": 0, "t": 20, "b": 0},
+        scene={
+            "xaxis_title": "X (mm)",
+            "yaxis_title": "Y (mm)",
+            "zaxis_title": "Z (mm)",
+            "aspectmode": "data",
+        },
     )
+    st.plotly_chart(fig, use_container_width=True)
 
-    results = read_json(suite_dir / "results.json")
-    rows = results.get("rows", [])
-    rows = rows if isinstance(rows, list) else []
 
-    # Thumbnail grid
-    _thumbnail_grid(rows)
+def main() -> None:
+    st.set_page_config(page_title="OpenSCAD Step 1 Dashboard", layout="wide")
+    st.title("OpenSCAD Step 1 Dashboard")
 
-    # Case table
-    case_table = [
-        {
-            "case_id": r.get("case_id"),
-            "status": status_badge(str(r.get("status", ""))),
-            "score": r.get("overall_score"),
-            "hausdorff_mm": r.get("hausdorff_mm"),
-            "parts": r.get("part_count"),
-            "errors": r.get("errors"),
-        }
-        for r in rows
-    ]
-
-    event = st.dataframe(
-        case_table,
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key="suite-cases",
-    )
-    sel = _selected_rows(event)
-    if not rows:
-        return
-
-    case_idx = max(0, min(sel[0] if sel else 0, len(rows) - 1))
-    row = rows[case_idx]
-    run_dir = str(row.get("run_dir", "")).strip()
-
-    st.subheader(f"Case: {row.get('case_id', 'unknown')}")
-    if run_dir and Path(run_dir).exists():
-        metrics = read_json(Path(run_dir) / "metrics.json")
-        _render_metrics_row(metrics)
-        _render_overlay(run_dir, metrics, key=f"sc-{case_idx}")
-        _render_phase_stepper(run_dir, key=f"sc-ps-{case_idx}")
-        _render_spatial_capsule_diff(run_dir, key=f"sc-scd-{case_idx}")
-        _render_violations(metrics)
-        with st.expander("SVG / Artifacts"):
-            _render_artifacts(run_dir, key=f"sa-{case_idx}")
-
-        # Failure modes
-        debug = metrics.get("debug", {}) if isinstance(metrics, dict) else {}
-        code_counts: Dict[str, int] = {}
-        for v in metrics.get("violations", []):
-            code = str(v.get("code", "")).strip()
-            if code:
-                code_counts[code] = code_counts.get(code, 0) + 1
-        modes = infer_failure_modes(
-            str(row.get("status", "")).lower(),
-            code_counts,
-            debug if isinstance(debug, dict) else {},
+    with st.sidebar:
+        st.subheader("Launch Step 1 Run")
+        runs_dir = st.text_input("Runs dir", value=str(ROOT / "runs"))
+        mesh_path = st.text_input(
+            "Mesh path", value=str(ROOT / "benchmarks" / "meshes" / "01_box.stl")
         )
-        if modes:
-            with st.expander("Failure modes"):
-                for m in modes:
-                    st.write(f"- {m}")
-    else:
-        st.warning(f"Run directory not found: {run_dir}")
+        design_name = st.text_input("Run name", value="step1_dashboard")
+        material_key = st.text_input("Material key", value="plywood_baltic_birch")
+        thickness_mm_raw = st.text_input("Preferred thickness mm (optional)", value="")
+        part_budget = st.number_input("Part budget", min_value=1, value=18, step=1)
+        auto_scale = st.checkbox("Auto scale", value=True)
+        target_height_mm = st.number_input(
+            "Target height mm", min_value=1.0, value=750.0, step=10.0
+        )
 
-    # Suite comparison
-    _suite_compare(suites, suites_dir)
+        if st.button("Run Step 1", use_container_width=True):
+            parsed_thickness = None
+            thickness_text = thickness_mm_raw.strip()
+            if thickness_text:
+                try:
+                    parsed_thickness = float(thickness_text)
+                except ValueError:
+                    st.error("Thickness must be numeric.")
+                    st.stop()
 
+            proc = _run_step1(
+                mesh_path=mesh_path,
+                design_name=design_name,
+                runs_dir=runs_dir,
+                material_key=material_key,
+                thickness_mm=parsed_thickness,
+                part_budget=int(part_budget),
+                auto_scale=bool(auto_scale),
+                target_height_mm=float(target_height_mm),
+            )
+            if proc.returncode != 0:
+                st.error("Run failed")
+                st.code(proc.stderr or "No stderr")
+            else:
+                st.success("Run completed")
+                st.code(proc.stdout)
 
-# ---------------------------------------------------------------------------
-# Tab 2: Run Detail
-# ---------------------------------------------------------------------------
-
-
-def _render_run_detail(runs_dir: str) -> None:
     runs = list_runs(runs_dir)
     if not runs:
         st.info("No runs found.")
         return
 
-    run_table = [
-        {
-            "run_id": r["run_id"],
-            "status": status_badge(str(r.get("status", ""))),
-            "design": r.get("design_name"),
-            "created_utc": r.get("created_utc"),
-        }
-        for r in runs
-    ]
+    step1_runs = [run for run in runs if run.get("is_step1")]
+    legacy_runs = [run for run in runs if not run.get("is_step1")]
 
-    event = st.dataframe(
-        run_table,
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key="run-table",
+    if legacy_runs:
+        st.warning(f"{len(legacy_runs)} legacy runs hidden (not Step 1 strategy).")
+
+    if not step1_runs:
+        st.info("No Step 1 runs found yet.")
+        return
+
+    run_ids = [str(run["run_id"]) for run in step1_runs]
+    selected_run_id = st.selectbox("Run", options=run_ids, index=0)
+    selected = next(run for run in step1_runs if str(run["run_id"]) == selected_run_id)
+
+    run_dir = Path(selected["run_dir"])
+    manifest = selected.get("manifest", {})
+    metrics = selected.get("metrics", {})
+    design = _load_artifact(
+        manifest, run_dir, "design_json", "design_step1_openscad.json"
     )
-    sel = _selected_rows(event)
-    if not runs:
-        return
+    capsule = _load_artifact(
+        manifest, run_dir, "spatial_capsule", "spatial_capsule_step1.json"
+    )
 
-    run_idx = max(0, min(sel[0] if sel else 0, len(runs) - 1))
-    run = runs[run_idx]
-    run_dir = str(run.get("run_dir", ""))
+    counts = metrics.get("counts", {}) if isinstance(metrics, dict) else {}
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Status", str(metrics.get("status", "unknown")).upper())
+    col2.metric("Panels", int(counts.get("panels", 0) or 0))
+    col3.metric("Families", int(counts.get("selected_families", 0) or 0))
+    col4.metric("Trims", int(counts.get("trim_pairs", 0) or 0))
+    col5.metric("Errors", int(counts.get("violations_error", 0) or 0))
 
-    if not run_dir or not Path(run_dir).exists():
-        st.warning("Run directory missing.")
-        return
+    tab_overview, tab_panels, tab_trim, tab_spatial, tab_audit, tab_files = st.tabs(
+        ["Overview", "Panels", "Trim", "Spatial", "Audit", "Files"]
+    )
 
-    metrics = read_json(Path(run_dir) / "metrics.json")
+    with tab_overview:
+        st.subheader("Manifest")
+        st.json(manifest)
+        st.subheader("Metrics")
+        st.json(metrics)
+        selection_debug = (
+            metrics.get("debug", {}).get("selection", {})
+            if isinstance(metrics, dict)
+            else {}
+        )
+        if isinstance(selection_debug, dict) and selection_debug:
+            st.subheader("Selection Summary")
+            st.dataframe(
+                [
+                    {
+                        "mode": selection_debug.get("selection_mode"),
+                        "shell_budget_spent": selection_debug.get(
+                            "budget_spent_shell",
+                            selection_debug.get("budget_spent_pass1"),
+                        ),
+                        "interior_budget_spent": selection_debug.get(
+                            "budget_spent_interior",
+                            selection_debug.get("budget_spent_pass2"),
+                        ),
+                        "shell_coverage": selection_debug.get(
+                            "shell_face_coverage_ratio",
+                            selection_debug.get("pass1_face_coverage_ratio"),
+                        ),
+                        "final_coverage": selection_debug.get(
+                            "final_face_coverage_ratio"
+                        ),
+                        "cavity_count": selection_debug.get("cavity_count"),
+                        "blocked_shell_conflicts": selection_debug.get(
+                            "blocked_shell_conflicts"
+                        ),
+                        "blocked_interior_conflicts": selection_debug.get(
+                            "blocked_interior_conflicts"
+                        ),
+                        "thin_gap_single_panel_count": selection_debug.get(
+                            "thin_gap_single_panel_count"
+                        ),
+                        "selected_layers_total": selection_debug.get(
+                            "selected_panel_layers_total"
+                        ),
+                    }
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
 
-    st.subheader(f"Run: {run['run_id']}")
-    _render_metrics_row(metrics)
-    _render_overlay(run_dir, metrics, key=f"rd-{run_idx}")
-    _render_phase_stepper(run_dir, key=f"rd-ps-{run_idx}")
-    _render_spatial_capsule_diff(run_dir, key=f"rd-scd-{run_idx}")
-    _render_violations(metrics)
-    with st.expander("SVG / Artifacts"):
-        _render_artifacts(run_dir, key=f"ra-{run_idx}")
+    with tab_panels:
+        panels = design.get("panels", []) if isinstance(design, dict) else []
+        if not isinstance(panels, list) or not panels:
+            st.info("No panels in design payload.")
+        else:
+            st.write(f"Panel count: {len(panels)}")
+            st.dataframe(
+                [
+                    {
+                        "panel_id": panel.get("panel_id"),
+                        "family_id": panel.get("family_id"),
+                        "thickness_mm": panel.get("thickness_mm"),
+                        "area_mm2": panel.get("area_mm2"),
+                        "source_face_count": panel.get("source_face_count"),
+                    }
+                    for panel in panels
+                    if isinstance(panel, dict)
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
 
+    with tab_trim:
+        trim_debug = (
+            metrics.get("debug", {}).get("trim", {})
+            if isinstance(metrics, dict)
+            else {}
+        )
+        if isinstance(trim_debug, dict) and trim_debug:
+            tc1, tc2, tc3 = st.columns(3)
+            tc1.metric("Pairs evaluated", int(trim_debug.get("trim_pairs_evaluated", 0)))
+            tc2.metric("Pairs applied", int(trim_debug.get("trim_pairs_applied", 0)))
+            total_area = sum(
+                float(d.get("loss_a_mm2", 0))
+                for d in trim_debug.get("trim_pair_details", [])
+                if isinstance(d, dict) and d.get("trimmed") == d.get("panel_a")
+            ) + sum(
+                float(d.get("loss_b_mm2", 0))
+                for d in trim_debug.get("trim_pair_details", [])
+                if isinstance(d, dict) and d.get("trimmed") == d.get("panel_b")
+            )
+            tc3.metric("Total area trimmed", f"{total_area:.0f} mm²")
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+        trim_decisions_raw = (
+            design.get("trim_decisions", []) if isinstance(design, dict) else []
+        )
+        if isinstance(trim_decisions_raw, list) and trim_decisions_raw:
+            st.subheader("Trim Decisions")
+            st.dataframe(
+                [
+                    {
+                        "trimmed": td.get("trimmed_panel_id"),
+                        "receiving": td.get("receiving_panel_id"),
+                        "loss_trimmed_mm2": td.get("loss_trimmed_mm2"),
+                        "loss_receiving_mm2": td.get("loss_receiving_mm2"),
+                        "dihedral_deg": td.get("dihedral_angle_deg"),
+                        "reason": td.get("direction_reason"),
+                    }
+                    for td in trim_decisions_raw
+                    if isinstance(td, dict)
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No trim decisions recorded (trim may be disabled or no intersections found).")
 
+        violations_raw = (
+            design.get("violations", []) if isinstance(design, dict) else []
+        )
+        perp_violations = [
+            v
+            for v in violations_raw
+            if isinstance(v, dict) and v.get("code") == "perpendicular_panel_overlap"
+        ]
+        if perp_violations:
+            st.subheader(f"Perpendicular Overlap Violations ({len(perp_violations)})")
+            st.dataframe(
+                [
+                    {
+                        "panel_id": v.get("panel_id"),
+                        "severity": v.get("severity"),
+                        "penetration_mm": v.get("value"),
+                        "message": v.get("message"),
+                    }
+                    for v in perp_violations
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
 
-def main() -> None:
-    st.set_page_config(page_title="Furniture Review", layout="wide")
-    st.title("Furniture Review")
+    with tab_spatial:
+        relation_counts = _relation_counts(capsule)
+        if relation_counts:
+            st.write("Relation class counts")
+            st.json(relation_counts)
+        mode = st.radio(
+            "Spatial view",
+            options=["Panel solids", "Part centers"],
+            horizontal=True,
+            index=0,
+        )
+        if mode == "Panel solids":
+            edge_on = st.checkbox("Show panel edges", value=True)
+            opacity = st.slider(
+                "Solid opacity", min_value=0.2, max_value=1.0, value=0.8, step=0.05
+            )
+            _render_solids_plot(
+                capsule, opacity=float(opacity), show_edges=bool(edge_on)
+            )
+        else:
+            _render_centers_plot(capsule)
 
-    c1, c2 = st.columns(2)
-    runs_dir = c1.text_input("Runs directory", value="runs")
-    suites_dir = c2.text_input("Suites directory", value="runs/suites")
+    with tab_audit:
+        artifacts = manifest.get("artifacts", {}) if isinstance(manifest, dict) else {}
+        checkpoints = (
+            artifacts.get("checkpoints", []) if isinstance(artifacts, dict) else []
+        )
+        st.write(f"Checkpoints: {len(checkpoints)}")
+        if checkpoints:
+            rows = []
+            for checkpoint_path in checkpoints:
+                checkpoint = read_json(Path(checkpoint_path))
+                rows.append(
+                    {
+                        "phase_index": checkpoint.get("phase_index"),
+                        "phase_name": checkpoint.get("phase_name"),
+                        "payload_sha256": checkpoint.get("payload_sha256"),
+                        "timestamp_utc": checkpoint.get("timestamp_utc"),
+                    }
+                )
+            st.dataframe(rows, use_container_width=True, hide_index=True)
 
-    tab_suite, tab_run = st.tabs(["Suite Review", "Run Detail"])
-    with tab_suite:
-        _render_suite_review(suites_dir)
-    with tab_run:
-        _render_run_detail(runs_dir)
+        decision_log_path = artifacts.get("decision_log")
+        if decision_log_path:
+            log_path = Path(decision_log_path)
+            if log_path.exists():
+                decisions: List[Dict[str, Any]] = []
+                for line in log_path.read_text(encoding="utf-8").splitlines()[:200]:
+                    if line.strip():
+                        try:
+                            decisions.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+                st.write(f"Decision records: {len(decisions)} (showing first 200)")
+                st.dataframe(
+                    [
+                        {
+                            "seq": d.get("seq"),
+                            "phase_index": d.get("phase_index"),
+                            "decision_type": d.get("decision_type"),
+                            "selected": d.get("selected"),
+                        }
+                        for d in decisions
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    with tab_files:
+        files = artifact_files(str(run_dir))
+        st.write(f"Artifacts: {len(files)} files")
+        for file_path in files:
+            st.code(str(file_path))
 
 
 if __name__ == "__main__":
