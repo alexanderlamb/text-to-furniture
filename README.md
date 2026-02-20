@@ -79,7 +79,8 @@ venv/bin/python3 -m pytest tests/
 ```
 
 Core tests:
-1. `tests/test_openscad_step1_cli.py`
-2. `tests/test_openscad_step1_pipeline.py`
-3. `tests/test_openscad_step1_audit.py`
-4. `tests/test_streamlit_step1_smoke.py`
+1. `tests/test_openscad_step1_pipeline.py` — core pipeline unit tests
+2. `tests/test_openscad_step1_trim.py` — trim resolution logic (24 tests)
+3. `tests/test_openscad_step1_audit.py` — audit trail and checkpoints
+4. `tests/test_openscad_step1_cli.py` — CLI integration test
+5. `tests/test_streamlit_step1_smoke.py` — dashboard smoke test
