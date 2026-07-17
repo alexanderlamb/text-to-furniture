@@ -7,7 +7,7 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Sequence
 
 import numpy as np
 
@@ -31,6 +31,63 @@ except ModuleNotFoundError:
     MultiPolygon = None
     Polygon = None
     triangulate = None
+
+
+HYBRID_STRATEGY_COLORS = {
+    "planar_skin": "#2f80ed",
+    "contour_stack": "#f2994a",
+    "waffle_ribs": "#8f7a1f",
+    "voxel_blocks": "#27ae60",
+    "unassigned": "#7a8694",
+}
+
+HYBRID_STRATEGY_ORDER = (
+    "planar_skin",
+    "contour_stack",
+    "waffle_ribs",
+    "voxel_blocks",
+)
+
+HYBRID_STRATEGY_LABELS = {
+    "planar_skin": "Planar Skin",
+    "contour_stack": "Contour Stack",
+    "waffle_ribs": "Waffle Ribs",
+    "voxel_blocks": "Voxel Blocks",
+    "hybrid": "Hybrid",
+}
+
+_BOX_TRIANGLES = np.asarray(
+    [
+        [0, 1, 2],
+        [0, 2, 3],
+        [4, 6, 5],
+        [4, 7, 6],
+        [0, 4, 5],
+        [0, 5, 1],
+        [1, 5, 6],
+        [1, 6, 2],
+        [2, 6, 7],
+        [2, 7, 3],
+        [3, 7, 4],
+        [3, 4, 0],
+    ],
+    dtype=int,
+)
+
+_BOX_EDGE_PAIRS = (
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+)
 
 
 def _python_executable() -> str:
@@ -306,6 +363,711 @@ def _part_color(index: int) -> str:
     return palette[index % len(palette)]
 
 
+def _hybrid_strategy_color(strategy_id: str) -> str:
+    if strategy_id in HYBRID_STRATEGY_COLORS:
+        return HYBRID_STRATEGY_COLORS[strategy_id]
+    digest = abs(hash(strategy_id)) % 360
+    return f"hsl({digest} 64% 42%)"
+
+
+def _hybrid_evaluation_path(run: Mapping[str, Any]) -> Path:
+    manifest = run.get("manifest", {})
+    artifacts = manifest.get("artifacts", {}) if isinstance(manifest, dict) else {}
+    evaluation_json = (
+        artifacts.get("evaluation_json") if isinstance(artifacts, dict) else None
+    )
+    if evaluation_json:
+        return Path(str(evaluation_json))
+    return (
+        Path(str(run.get("run_dir", "")))
+        / "artifacts"
+        / "hybrid_evaluation"
+        / "evaluation.json"
+    )
+
+
+def _load_hybrid_evaluation(run: Mapping[str, Any]) -> Dict[str, Any]:
+    return read_json(_hybrid_evaluation_path(run))
+
+
+def _hybrid_rows_by_mesh(evaluation: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
+    rows = evaluation.get("rows", [])
+    if not isinstance(rows, list):
+        return {}
+    by_mesh: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        mesh_name = str(row.get("mesh") or Path(str(row.get("mesh_path", ""))).name)
+        if mesh_name:
+            by_mesh[mesh_name] = row
+    return by_mesh
+
+
+def _run_display_name(run: Mapping[str, Any]) -> str:
+    run_id = str(run.get("run_id") or Path(str(run.get("run_dir", ""))).name)
+    design_name = str(run.get("design_name") or "")
+    return (
+        f"{run_id} · {design_name}" if design_name and design_name != run_id else run_id
+    )
+
+
+def _load_hybrid_plan(row: Mapping[str, Any]) -> Dict[str, Any]:
+    path_text = str(row.get("hybrid_plan") or "").strip()
+    return read_json(Path(path_text)) if path_text else {}
+
+
+def _hybrid_plan_path(row: Mapping[str, Any]) -> Path | None:
+    path_text = str(row.get("hybrid_plan") or "").strip()
+    return Path(path_text) if path_text else None
+
+
+def _source_strategy_plan_path(row: Mapping[str, Any], strategy_id: str) -> Path | None:
+    hybrid_plan_path = _hybrid_plan_path(row)
+    if hybrid_plan_path is None:
+        return None
+    return hybrid_plan_path.parent / "source_strategies" / strategy_id / "plan.json"
+
+
+def _load_source_strategy_plan(
+    row: Mapping[str, Any], strategy_id: str
+) -> Dict[str, Any]:
+    path = _source_strategy_plan_path(row, strategy_id)
+    return read_json(path) if path is not None else {}
+
+
+def _strategy_label(strategy_id: str) -> str:
+    return HYBRID_STRATEGY_LABELS.get(
+        strategy_id, strategy_id.replace("_", " ").title()
+    )
+
+
+def _float_triplet(raw: Any) -> np.ndarray | None:
+    if not isinstance(raw, list) or len(raw) != 3:
+        return None
+    try:
+        return np.asarray([float(raw[0]), float(raw[1]), float(raw[2])], dtype=float)
+    except (TypeError, ValueError):
+        return None
+
+
+def _box_vertices(aabb_min: Sequence[float], aabb_max: Sequence[float]) -> np.ndarray:
+    lo = np.asarray(aabb_min, dtype=float)
+    hi = np.asarray(aabb_max, dtype=float)
+    return np.asarray(
+        [
+            [lo[0], lo[1], lo[2]],
+            [hi[0], lo[1], lo[2]],
+            [hi[0], hi[1], lo[2]],
+            [lo[0], hi[1], lo[2]],
+            [lo[0], lo[1], hi[2]],
+            [hi[0], lo[1], hi[2]],
+            [hi[0], hi[1], hi[2]],
+            [lo[0], hi[1], hi[2]],
+        ],
+        dtype=float,
+    )
+
+
+def _box_center(aabb_min: Sequence[float], aabb_max: Sequence[float]) -> np.ndarray:
+    return (np.asarray(aabb_min, dtype=float) + np.asarray(aabb_max, dtype=float)) * 0.5
+
+
+def _add_box_trace(
+    fig: Any,
+    *,
+    aabb_min: Sequence[float],
+    aabb_max: Sequence[float],
+    color: str,
+    name: str,
+    hover: str,
+    opacity: float,
+    show_edges: bool,
+    show_legend: bool,
+    legend_group: str,
+) -> None:
+    vertices = _box_vertices(aabb_min, aabb_max)
+    fig.add_trace(
+        go.Mesh3d(
+            x=vertices[:, 0],
+            y=vertices[:, 1],
+            z=vertices[:, 2],
+            i=_BOX_TRIANGLES[:, 0],
+            j=_BOX_TRIANGLES[:, 1],
+            k=_BOX_TRIANGLES[:, 2],
+            color=color,
+            opacity=opacity,
+            name=name,
+            legendgroup=legend_group,
+            showlegend=show_legend,
+            flatshading=True,
+            hovertemplate=hover + "<extra></extra>",
+            showscale=False,
+        )
+    )
+    if not show_edges:
+        return
+
+    xs: list[float | None] = []
+    ys: list[float | None] = []
+    zs: list[float | None] = []
+    for start, end in _BOX_EDGE_PAIRS:
+        xs.extend([float(vertices[start, 0]), float(vertices[end, 0]), None])
+        ys.extend([float(vertices[start, 1]), float(vertices[end, 1]), None])
+        zs.extend([float(vertices[start, 2]), float(vertices[end, 2]), None])
+    fig.add_trace(
+        go.Scatter3d(
+            x=xs,
+            y=ys,
+            z=zs,
+            mode="lines",
+            line={"color": "#111111", "width": 2},
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+
+
+def _assignment_strategy_by_region(plan: Mapping[str, Any]) -> Dict[str, str]:
+    assignments = plan.get("assignments", [])
+    if not isinstance(assignments, list):
+        return {}
+    result: Dict[str, str] = {}
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        region_id = str(assignment.get("region_id") or "")
+        strategy_id = str(assignment.get("strategy_id") or "")
+        if region_id and strategy_id:
+            result[region_id] = strategy_id
+    return result
+
+
+def _part_source_strategy(part: Mapping[str, Any]) -> str:
+    metadata = part.get("metadata", {})
+    if isinstance(metadata, dict):
+        return str(
+            metadata.get("source_strategy_id") or part.get("strategy_id") or "unknown"
+        )
+    return str(part.get("strategy_id") or "unknown")
+
+
+def _part_regions(part: Mapping[str, Any]) -> str:
+    metadata = part.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return ""
+    region_ids = metadata.get("hybrid_region_ids") or metadata.get("hybrid_region_id")
+    if isinstance(region_ids, list):
+        return ", ".join(str(item) for item in region_ids)
+    return str(region_ids or "")
+
+
+def _hybrid_scene_items(
+    plan: Mapping[str, Any], view_mode: str
+) -> list[dict[str, Any]]:
+    if view_mode == "Regions":
+        strategy_by_region = _assignment_strategy_by_region(plan)
+        regions = plan.get("regions", [])
+        items: list[dict[str, Any]] = []
+        if not isinstance(regions, list):
+            return items
+        for region in regions:
+            if not isinstance(region, dict):
+                continue
+            region_id = str(region.get("region_id") or "region")
+            strategy_id = strategy_by_region.get(region_id, "unassigned")
+            kind = str(region.get("kind") or "")
+            items.append(
+                {
+                    "id": region_id,
+                    "strategy": strategy_id,
+                    "aabb_min": region.get("aabb_min"),
+                    "aabb_max": region.get("aabb_max"),
+                    "hover": (
+                        f"<b>{region_id}</b><br>kind={kind}<br>"
+                        f"assigned={strategy_id}<br>"
+                        f"volume={float(region.get('volume_mm3', 0.0) or 0.0):.0f} mm³"
+                    ),
+                }
+            )
+        return items
+
+    parts = plan.get("parts", [])
+    items = []
+    if not isinstance(parts, list):
+        return items
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        part_id = str(part.get("part_id") or "part")
+        strategy_id = _part_source_strategy(part)
+        items.append(
+            {
+                "id": part_id,
+                "strategy": strategy_id,
+                "aabb_min": part.get("aabb_min"),
+                "aabb_max": part.get("aabb_max"),
+                "hover": (
+                    f"<b>{part_id}</b><br>strategy={strategy_id}<br>"
+                    f"kind={part.get('kind', '')}<br>regions={_part_regions(part)}<br>"
+                    f"volume={float(part.get('volume_mm3', 0.0) or 0.0):.0f} mm³"
+                ),
+            }
+        )
+    return items
+
+
+def _render_hybrid_3d_plot(
+    plan: Mapping[str, Any],
+    *,
+    view_mode: str,
+    opacity: float,
+    show_edges: bool,
+    show_labels: bool,
+    plot_key: str,
+    height: int | None = None,
+) -> None:
+    if go is None:
+        st.info("Install plotly to render hybrid 3D previews.")
+        return
+    items = _hybrid_scene_items(plan, view_mode)
+    if not items:
+        st.info(f"No {view_mode.lower()} available in hybrid plan.")
+        return
+
+    fig = go.Figure()
+    labels_x: list[float] = []
+    labels_y: list[float] = []
+    labels_z: list[float] = []
+    labels_text: list[str] = []
+    legend_seen: set[str] = set()
+    rendered = 0
+
+    for item in items:
+        aabb_min = _float_triplet(item.get("aabb_min"))
+        aabb_max = _float_triplet(item.get("aabb_max"))
+        if aabb_min is None or aabb_max is None or np.any(aabb_max <= aabb_min):
+            continue
+        strategy_id = str(item["strategy"])
+        color = _hybrid_strategy_color(strategy_id)
+        show_legend = strategy_id not in legend_seen
+        legend_seen.add(strategy_id)
+        _add_box_trace(
+            fig,
+            aabb_min=aabb_min,
+            aabb_max=aabb_max,
+            color=color,
+            name=strategy_id,
+            hover=str(item["hover"]),
+            opacity=opacity,
+            show_edges=show_edges,
+            show_legend=show_legend,
+            legend_group=strategy_id,
+        )
+        center = _box_center(aabb_min, aabb_max)
+        labels_x.append(float(center[0]))
+        labels_y.append(float(center[1]))
+        labels_z.append(float(center[2]))
+        labels_text.append(str(item["id"]))
+        rendered += 1
+
+    if rendered == 0:
+        st.info(f"No valid {view_mode.lower()} AABBs to render.")
+        return
+
+    if show_labels:
+        fig.add_trace(
+            go.Scatter3d(
+                x=labels_x,
+                y=labels_y,
+                z=labels_z,
+                mode="text",
+                text=labels_text,
+                textposition="top center",
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+
+    layout: dict[str, Any] = {
+        "margin": {"l": 0, "r": 0, "t": 8, "b": 0},
+        "scene": {
+            "xaxis_title": "X (mm)",
+            "yaxis_title": "Y (mm)",
+            "zaxis_title": "Z (mm)",
+            "aspectmode": "data",
+        },
+        "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02},
+    }
+    if height is not None:
+        layout["height"] = height
+    fig.update_layout(**layout)
+    st.plotly_chart(fig, use_container_width=True, key=plot_key)
+
+
+def _format_strategy_mix(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return ", ".join(f"{key}: {value[key]}" for key in sorted(value))
+
+
+def _plan_overall_score(plan: Mapping[str, Any]) -> float:
+    scores = plan.get("scores", {})
+    raw = plan.get("overall_score")
+    if raw is None and isinstance(scores, dict):
+        raw = scores.get("overall")
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _plan_count(plan: Mapping[str, Any], key: str, fallback_collection: str) -> int:
+    raw = plan.get(key)
+    if raw is None:
+        collection = plan.get(fallback_collection, [])
+        return len(collection) if isinstance(collection, list) else 0
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        collection = plan.get(fallback_collection, [])
+        return len(collection) if isinstance(collection, list) else 0
+
+
+def _hybrid_part_counts_by_strategy(plan: Mapping[str, Any]) -> Counter[str]:
+    parts = plan.get("parts", [])
+    counter: Counter[str] = Counter()
+    if not isinstance(parts, list):
+        return counter
+    for part in parts:
+        if isinstance(part, dict):
+            counter[_part_source_strategy(part)] += 1
+    return counter
+
+
+def _hybrid_volume_by_strategy(plan: Mapping[str, Any]) -> Counter[str]:
+    parts = plan.get("parts", [])
+    counter: Counter[str] = Counter()
+    if not isinstance(parts, list):
+        return counter
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        try:
+            volume = float(part.get("volume_mm3", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            volume = 0.0
+        counter[_part_source_strategy(part)] += volume
+    return counter
+
+
+def _hybrid_assignment_counts_by_strategy(plan: Mapping[str, Any]) -> Counter[str]:
+    assignments = plan.get("assignments", [])
+    counter: Counter[str] = Counter()
+    if not isinstance(assignments, list):
+        return counter
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        strategy_id = str(assignment.get("strategy_id") or "unassigned")
+        counter[strategy_id] += 1
+    return counter
+
+
+def _strategy_board_summary_rows(
+    source_plans: Mapping[str, Mapping[str, Any]],
+    hybrid_plan: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    selected_counts = _hybrid_part_counts_by_strategy(hybrid_plan)
+    assigned_counts = _hybrid_assignment_counts_by_strategy(hybrid_plan)
+    selected_volumes = _hybrid_volume_by_strategy(hybrid_plan)
+
+    rows: list[dict[str, Any]] = []
+    for strategy_id in HYBRID_STRATEGY_ORDER:
+        plan = source_plans.get(strategy_id, {})
+        rows.append(
+            {
+                "strategy": _strategy_label(strategy_id),
+                "source_status": str(plan.get("status") or "missing"),
+                "source_score": round(_plan_overall_score(plan), 4),
+                "source_parts": _plan_count(plan, "part_count", "parts"),
+                "source_joints": _plan_count(plan, "joint_count", "joints"),
+                "hybrid_regions": int(assigned_counts.get(strategy_id, 0)),
+                "hybrid_selected_parts": int(selected_counts.get(strategy_id, 0)),
+                "hybrid_selected_cm3": round(
+                    float(selected_volumes.get(strategy_id, 0.0)) / 1000.0, 1
+                ),
+            }
+        )
+    return rows
+
+
+def _hybrid_assignment_rows(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    assignments = plan.get("assignments", [])
+    if not isinstance(assignments, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        part_ids = assignment.get("part_ids", [])
+        reason_codes = assignment.get("reason_codes", [])
+        rows.append(
+            {
+                "region": assignment.get("region_id"),
+                "chosen_strategy": _strategy_label(
+                    str(assignment.get("strategy_id") or "unassigned")
+                ),
+                "fit_score": round(float(assignment.get("fit_score", 0.0) or 0.0), 4),
+                "selected_parts": len(part_ids) if isinstance(part_ids, list) else 0,
+                "reasons": (
+                    ", ".join(str(code) for code in reason_codes[:4])
+                    if isinstance(reason_codes, list)
+                    else ""
+                ),
+            }
+        )
+    return rows
+
+
+def _render_strategy_plan_card(
+    *,
+    title: str,
+    plan: Mapping[str, Any],
+    plot_key: str,
+    opacity: float,
+    show_edges: bool,
+    show_labels: bool,
+    height: int,
+    caption: str = "",
+) -> None:
+    if not plan:
+        st.markdown(f"#### {title}")
+        st.warning("Missing plan artifact.")
+        return
+
+    part_count = _plan_count(plan, "part_count", "parts")
+    joint_count = _plan_count(plan, "joint_count", "joints")
+    status = str(plan.get("status") or "unknown")
+    score = _plan_overall_score(plan)
+    st.markdown(f"#### {title}")
+    st.caption(
+        f"status={status} · score={score:.3f} · parts={part_count} · joints={joint_count}"
+    )
+    if caption:
+        st.caption(caption)
+    _render_hybrid_3d_plot(
+        plan,
+        view_mode="Parts",
+        opacity=opacity,
+        show_edges=show_edges,
+        show_labels=show_labels,
+        plot_key=plot_key,
+        height=height,
+    )
+
+
+def _render_hybrid_strategy_board(hybrid_runs: list[Dict[str, Any]]) -> None:
+    st.subheader("Strategy Board")
+    st.caption(
+        "One mesh, five views: the four individual strategy plans, then the hybrid "
+        "selection. These are part AABBs for fast comparison, not final cut geometry."
+    )
+
+    run_labels = [_run_display_name(run) for run in hybrid_runs]
+    selected_run_label = st.selectbox("Run", run_labels, index=0, key="board-run")
+    selected_run = hybrid_runs[run_labels.index(selected_run_label)]
+    evaluation = _load_hybrid_evaluation(selected_run)
+    rows_by_mesh = _hybrid_rows_by_mesh(evaluation)
+    mesh_names = sorted(rows_by_mesh)
+    if not mesh_names:
+        st.info("No mesh rows found in selected hybrid evaluation.")
+        return
+
+    controls = st.columns([2, 1, 1, 1])
+    mesh_name = controls[0].selectbox("Mesh", mesh_names, index=0, key="board-mesh")
+    show_edges = controls[1].checkbox("Edges", value=True, key="board-edges")
+    show_labels = controls[2].checkbox("Labels", value=False, key="board-labels")
+    opacity = controls[3].slider(
+        "Opacity",
+        min_value=0.1,
+        max_value=1.0,
+        value=0.6,
+        step=0.05,
+        key="board-opacity",
+    )
+
+    row = rows_by_mesh[mesh_name]
+    hybrid_plan = _load_hybrid_plan(row)
+    source_plans = {
+        strategy_id: _load_source_strategy_plan(row, strategy_id)
+        for strategy_id in HYBRID_STRATEGY_ORDER
+    }
+
+    st.markdown("##### Individual outputs + hybrid pick")
+    card_columns = st.columns([1, 1, 1, 1, 1.12])
+    for column, strategy_id in zip(card_columns, HYBRID_STRATEGY_ORDER):
+        with column:
+            _render_strategy_plan_card(
+                title=_strategy_label(strategy_id),
+                plan=source_plans[strategy_id],
+                plot_key=(
+                    f"strategy-board-{selected_run.get('run_id')}-{mesh_name}-"
+                    f"{strategy_id}"
+                ),
+                opacity=opacity,
+                show_edges=show_edges,
+                show_labels=show_labels,
+                height=300,
+                caption="Standalone output",
+            )
+
+    with card_columns[-1]:
+        _render_strategy_plan_card(
+            title="Hybrid Selection",
+            plan=hybrid_plan,
+            plot_key=f"strategy-board-{selected_run.get('run_id')}-{mesh_name}-hybrid",
+            opacity=opacity,
+            show_edges=show_edges,
+            show_labels=show_labels,
+            height=300,
+            caption="Selected/reused pieces, colored by source strategy",
+        )
+
+    st.markdown("##### How the hybrid combined them")
+    summary_rows = _strategy_board_summary_rows(source_plans, hybrid_plan)
+    st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+
+    assignment_rows = _hybrid_assignment_rows(hybrid_plan)
+    if assignment_rows:
+        st.dataframe(assignment_rows, use_container_width=True, hide_index=True)
+
+    with st.expander("Open raw selected row + source plan paths"):
+        source_paths = {
+            strategy_id: str(_source_strategy_plan_path(row, strategy_id) or "")
+            for strategy_id in HYBRID_STRATEGY_ORDER
+        }
+        st.json({"row": row, "source_strategy_paths": source_paths})
+
+
+def _render_hybrid_run_card(
+    *,
+    run: Mapping[str, Any],
+    row: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    view_mode: str,
+    opacity: float,
+    show_edges: bool,
+    show_labels: bool,
+    plot_key: str,
+) -> None:
+    st.subheader(_run_display_name(run))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Score", f"{float(row.get('overall_score', 0.0) or 0.0):.3f}")
+    c2.metric("Parts", int(row.get("parts", 0) or 0))
+    c3.metric("Regions", int(row.get("regions", 0) or 0))
+    c4.metric("Joints", int(row.get("joints", 0) or 0))
+    st.caption(f"Mix: {_format_strategy_mix(row.get('strategy_mix'))}")
+    flags = row.get("flags", [])
+    if isinstance(flags, list) and flags:
+        st.warning("Flags: " + ", ".join(str(flag) for flag in flags))
+    _render_hybrid_3d_plot(
+        plan,
+        view_mode=view_mode,
+        opacity=opacity,
+        show_edges=show_edges,
+        show_labels=show_labels,
+        plot_key=plot_key,
+    )
+
+
+def _render_hybrid_compare(hybrid_runs: list[Dict[str, Any]]) -> None:
+    st.header("Hybrid 3D Compare")
+    st.caption(
+        "Prototype viewer: renders generated region and selected-part AABBs, "
+        "colored by source strategy. This is not exact mesh geometry yet."
+    )
+
+    hybrid_view = st.radio(
+        "Hybrid view",
+        ["Strategy Board", "Run Compare"],
+        horizontal=True,
+        key="hybrid-view",
+    )
+    if hybrid_view == "Strategy Board":
+        _render_hybrid_strategy_board(hybrid_runs)
+        return
+
+    st.subheader("Run Compare")
+    run_labels = [_run_display_name(run) for run in hybrid_runs]
+    left_index = 1 if len(hybrid_runs) > 1 else 0
+    right_index = 0
+    controls = st.columns([2, 2, 1, 1, 1])
+    left_label = controls[0].selectbox("Baseline run", run_labels, index=left_index)
+    right_label = controls[1].selectbox("Candidate run", run_labels, index=right_index)
+    view_mode = controls[2].radio("3D view", ["Parts", "Regions"], horizontal=True)
+    show_edges = controls[3].checkbox("Edges", value=True)
+    show_labels = controls[4].checkbox("Labels", value=False)
+    opacity = st.slider("Opacity", min_value=0.1, max_value=1.0, value=0.6, step=0.05)
+
+    left_run = hybrid_runs[run_labels.index(left_label)]
+    right_run = hybrid_runs[run_labels.index(right_label)]
+    left_eval = _load_hybrid_evaluation(left_run)
+    right_eval = _load_hybrid_evaluation(right_run)
+    left_rows = _hybrid_rows_by_mesh(left_eval)
+    right_rows = _hybrid_rows_by_mesh(right_eval)
+    mesh_names = sorted(set(left_rows) & set(right_rows))
+    if not mesh_names:
+        st.info("No overlapping mesh rows between selected runs.")
+        return
+
+    mesh_name = st.selectbox("Mesh", mesh_names, index=0)
+    left_row = left_rows[mesh_name]
+    right_row = right_rows[mesh_name]
+    left_plan = _load_hybrid_plan(left_row)
+    right_plan = _load_hybrid_plan(right_row)
+
+    st.subheader("Delta")
+    d1, d2, d3, d4 = st.columns(4)
+    left_score = float(left_row.get("overall_score", 0.0) or 0.0)
+    right_score = float(right_row.get("overall_score", 0.0) or 0.0)
+    left_parts = int(left_row.get("parts", 0) or 0)
+    right_parts = int(right_row.get("parts", 0) or 0)
+    left_joints = int(left_row.get("joints", 0) or 0)
+    right_joints = int(right_row.get("joints", 0) or 0)
+    d1.metric("Score", f"{right_score:.3f}", delta=f"{right_score - left_score:+.3f}")
+    d2.metric("Parts", right_parts, delta=right_parts - left_parts)
+    d3.metric("Joints", right_joints, delta=right_joints - left_joints)
+    d4.metric("Run status", str(right_eval.get("status", "unknown")).upper())
+
+    col_left, col_right = st.columns(2)
+    with col_left:
+        _render_hybrid_run_card(
+            run=left_run,
+            row=left_row,
+            plan=left_plan,
+            view_mode=view_mode,
+            opacity=opacity,
+            show_edges=show_edges,
+            show_labels=show_labels,
+            plot_key=f"hybrid-left-{mesh_name}-{left_run.get('run_id')}-{view_mode}",
+        )
+    with col_right:
+        _render_hybrid_run_card(
+            run=right_run,
+            row=right_row,
+            plan=right_plan,
+            view_mode=view_mode,
+            opacity=opacity,
+            show_edges=show_edges,
+            show_labels=show_labels,
+            plot_key=f"hybrid-right-{mesh_name}-{right_run.get('run_id')}-{view_mode}",
+        )
+
+    with st.expander("Selected row payloads"):
+        st.json({"baseline": left_row, "candidate": right_row})
+
+
 def _render_solids_plot(
     capsule: Dict[str, Any], *, opacity: float = 0.8, show_edges: bool = True
 ) -> None:
@@ -447,12 +1209,19 @@ def _render_solids_plot(
 
 
 def main() -> None:
-    st.set_page_config(page_title="OpenSCAD Step 1 Dashboard", layout="wide")
-    st.title("OpenSCAD Step 1 Dashboard")
+    st.set_page_config(page_title="Furniture Fabrication Dashboard", layout="wide")
+    st.title("Furniture Fabrication Dashboard")
 
     with st.sidebar:
-        st.subheader("Launch Step 1 Run")
         runs_dir = st.text_input("Runs dir", value=str(ROOT / "runs"))
+        dashboard_mode = st.radio(
+            "Dashboard",
+            options=["Hybrid 3D Compare", "OpenSCAD Step 1"],
+            index=0,
+        )
+
+        st.divider()
+        st.subheader("Launch Step 1 Run")
         mesh_path = st.text_input(
             "Mesh path", value=str(ROOT / "benchmarks" / "meshes" / "01_box.stl")
         )
@@ -497,11 +1266,27 @@ def main() -> None:
         st.info("No runs found.")
         return
 
+    if dashboard_mode == "Hybrid 3D Compare":
+        hybrid_runs = [run for run in runs if run.get("is_hybrid_eval")]
+        if not hybrid_runs:
+            st.info("No hybrid benchmark evaluation runs found yet.")
+            return
+        _render_hybrid_compare(hybrid_runs)
+        return
+
     step1_runs = [run for run in runs if run.get("is_step1")]
-    legacy_runs = [run for run in runs if not run.get("is_step1")]
+    legacy_runs = [
+        run for run in runs if not run.get("is_step1") and not run.get("is_hybrid_eval")
+    ]
+    hybrid_runs = [run for run in runs if run.get("is_hybrid_eval")]
 
     if legacy_runs:
         st.warning(f"{len(legacy_runs)} legacy runs hidden (not Step 1 strategy).")
+    if hybrid_runs:
+        st.info(
+            f"{len(hybrid_runs)} hybrid evaluation runs hidden. "
+            "Switch Dashboard to Hybrid 3D Compare to inspect them."
+        )
 
     if not step1_runs:
         st.info("No Step 1 runs found yet.")
@@ -613,7 +1398,9 @@ def main() -> None:
         )
         if isinstance(trim_debug, dict) and trim_debug:
             tc1, tc2, tc3 = st.columns(3)
-            tc1.metric("Pairs evaluated", int(trim_debug.get("trim_pairs_evaluated", 0)))
+            tc1.metric(
+                "Pairs evaluated", int(trim_debug.get("trim_pairs_evaluated", 0))
+            )
             tc2.metric("Pairs applied", int(trim_debug.get("trim_pairs_applied", 0)))
             total_area = sum(
                 float(d.get("loss_a_mm2", 0))
@@ -648,7 +1435,9 @@ def main() -> None:
                 hide_index=True,
             )
         else:
-            st.info("No trim decisions recorded (trim may be disabled or no intersections found).")
+            st.info(
+                "No trim decisions recorded (trim may be disabled or no intersections found)."
+            )
 
         violations_raw = (
             design.get("violations", []) if isinstance(design, dict) else []

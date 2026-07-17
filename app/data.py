@@ -42,6 +42,7 @@ def list_runs(runs_dir: str) -> List[Dict[str, Any]]:
                 "manifest": manifest,
                 "metrics": metrics,
                 "is_step1": strategy == "openscad_step1_clean_slate",
+                "is_hybrid_eval": strategy == "hybrid_benchmark_evaluation",
             }
         )
 
